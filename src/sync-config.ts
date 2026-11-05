@@ -1,0 +1,324 @@
+/**
+ * 同步配置 —— 集中解析环境变量，向其余代码暴露有类型的配置对象。
+ *
+ * 环境变量**名称属于对外接口，不要改名**。非法值一律「失败在关闭一侧」：
+ * 告警并回落到最保守的行为，绝不悄悄退化成「全部同步」。
+ */
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import dotenv from 'dotenv';
+import { consola } from 'consola';
+import { SHELF_TYPES, type NeodbShelfMark, type ShelfType } from './types';
+import type {
+  CommentMergeProfile,
+  RatingMergeProfile,
+  StatusGuard,
+} from './rules/neodb-bangumi-mapping';
+
+dotenv.config();
+
+/** 本项目读取的全部环境变量名 —— verify-docs 以此与 .env.example 双向核对。 */
+export const ENV_KEYS: readonly string[] = [
+  'NEODB_API_TOKEN',
+  'NEODB_BASE_URL',
+  'NEODB_REQUEST_DELAY_MS',
+  'NEODB_MAX_PAGES',
+  'BANGUMI_ACCESS_TOKEN',
+  'BANGUMI_USER_AGENT',
+  'BANGUMI_REQUEST_DELAY_MS',
+  'SYNC_DRY_RUN',
+  'SYNC_MAX_ITEMS',
+  'SYNC_SHELF_TYPES',
+  'SYNC_CATEGORIES',
+  'SYNC_YEAR_TOLERANCE',
+  'SYNC_NEODB_BANGUMI_RATING',
+  'SYNC_NEODB_BANGUMI_COMMENT',
+  'SYNC_STATUS_GUARD',
+  'SYNC_MAP_PRIVATE',
+  'SYNC_PROGRESS',
+  'SYNC_INCLUDE_SP',
+  'SYNC_INCREMENTAL',
+  'SYNC_STATE_FILE',
+  'FULL_SYNC',
+  'SYNC_UNMATCHED_LOG',
+  'SYNC_REPORT_FILE',
+  'SYNC_SUMMARY_FILE',
+];
+
+const VALID_CATEGORIES: readonly string[] = [
+  'book',
+  'movie',
+  'tv',
+  'music',
+  'game',
+  'podcast',
+  'performance',
+];
+
+export type CategoryAllowlist =
+  | { mode: 'all' }
+  | { mode: 'none'; raw: string }
+  | { mode: 'set'; values: ReadonlySet<string> };
+
+function envEnabled(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') {
+    return defaultValue;
+  }
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
+function envNumber(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') {
+    return defaultValue;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    consola.warn(`${name}=${raw} 不是数字；回落到默认值 ${defaultValue}`);
+    return defaultValue;
+  }
+  return value;
+}
+
+function envString(name: string, defaultValue: string): string {
+  const raw = process.env[name];
+  return raw === undefined || raw.trim() === '' ? defaultValue : raw.trim();
+}
+
+/**
+ * 解析分类白名单，刻意保持三态：`none` 与 `all` 必须区分开，写错分类名时
+ * **失败在关闭一侧**（不同步任何东西并明确告知），而不是退化成「全部同步」。
+ */
+function parseCategoryAllowlist(
+  name: string,
+  raw: string | undefined,
+): CategoryAllowlist {
+  const tokens = (raw ?? '')
+    .split(',')
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  if (!tokens.length) {
+    return { mode: 'all' };
+  }
+  const values = new Set<string>();
+  for (const token of tokens) {
+    if (!VALID_CATEGORIES.includes(token)) {
+      consola.warn(
+        `${name} 里的分类「${token}」无法识别；白名单整体作废，本次不同步任何分类。可用值: ${VALID_CATEGORIES.join(',')}`,
+      );
+      return { mode: 'none', raw: raw ?? '' };
+    }
+    values.add(token);
+  }
+  return { mode: 'set', values };
+}
+
+function parseShelfTypes(name: string, raw: string | undefined): ShelfType[] {
+  const tokens = (raw ?? '')
+    .split(',')
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  if (!tokens.length) {
+    return [...SHELF_TYPES];
+  }
+  const values: ShelfType[] = [];
+  for (const token of tokens) {
+    if (!SHELF_TYPES.includes(token as ShelfType)) {
+      consola.warn(
+        `${name} 里的书架「${token}」无法识别，已忽略。可用值: ${SHELF_TYPES.join(',')}`,
+      );
+      continue;
+    }
+    if (!values.includes(token as ShelfType)) {
+      values.push(token as ShelfType);
+    }
+  }
+  return values;
+}
+
+function parseEnum<T extends string>(
+  name: string,
+  raw: string | undefined,
+  allowed: readonly T[],
+  defaultValue: T,
+): T {
+  const value = raw?.trim().toLowerCase();
+  if (value === undefined || value === '') {
+    return defaultValue;
+  }
+  if (allowed.includes(value as T)) {
+    return value as T;
+  }
+  consola.warn(
+    `${name}=${raw} 非法（可用值: ${allowed.join('|')}）；回落到 ${defaultValue}`,
+  );
+  return defaultValue;
+}
+
+export type SyncConfig = {
+  neodb: {
+    token?: string;
+    baseUrl: string;
+    delayMs: number;
+    maxPages: number;
+  };
+  bangumi: {
+    token?: string;
+    userAgent: string;
+    delayMs: number;
+  };
+  sync: {
+    dryRun: boolean;
+    maxItems: number;
+    shelfTypes: ShelfType[];
+    categories: CategoryAllowlist;
+    yearTolerance: number;
+    ratingProfile: RatingMergeProfile;
+    commentProfile: CommentMergeProfile;
+    statusGuard: StatusGuard;
+    mapPrivate: boolean;
+    progress: boolean;
+    includeSp: boolean;
+    incremental: boolean;
+    stateFile: string;
+    fullSync: boolean;
+    unmatchedLog: string;
+    reportFile: string;
+    summaryFile: string;
+  };
+};
+
+export function loadSyncConfig(): SyncConfig {
+  const maxItemsRaw = envNumber('SYNC_MAX_ITEMS', 50);
+  const maxPagesRaw = envNumber('NEODB_MAX_PAGES', 10);
+  return {
+    neodb: {
+      token: process.env.NEODB_API_TOKEN || undefined,
+      baseUrl: envString('NEODB_BASE_URL', 'https://neodb.social'),
+      delayMs: envNumber('NEODB_REQUEST_DELAY_MS', 300),
+      maxPages: maxPagesRaw >= 1 ? Math.floor(maxPagesRaw) : 10,
+    },
+    bangumi: {
+      token: process.env.BANGUMI_ACCESS_TOKEN || undefined,
+      userAgent: envString(
+        'BANGUMI_USER_AGENT',
+        'neodb-to-bangumi/1.0 (+https://github.com/sachikoakina/neodb-to-bangumi)',
+      ),
+      delayMs: envNumber('BANGUMI_REQUEST_DELAY_MS', 400),
+    },
+    sync: {
+      dryRun: envEnabled('SYNC_DRY_RUN', false),
+      // SYNC_MAX_ITEMS=0 不是「无限」——低于 1 回落为 50。
+      maxItems: maxItemsRaw >= 1 ? Math.floor(maxItemsRaw) : 50,
+      shelfTypes: parseShelfTypes('SYNC_SHELF_TYPES', process.env.SYNC_SHELF_TYPES),
+      categories: parseCategoryAllowlist(
+        'SYNC_CATEGORIES',
+        process.env.SYNC_CATEGORIES,
+      ),
+      yearTolerance: Math.max(0, envNumber('SYNC_YEAR_TOLERANCE', 1)),
+      ratingProfile: parseEnum(
+        'SYNC_NEODB_BANGUMI_RATING',
+        process.env.SYNC_NEODB_BANGUMI_RATING,
+        ['bangumi_prefer', 'overwrite'] as const,
+        'bangumi_prefer',
+      ),
+      commentProfile: parseEnum(
+        'SYNC_NEODB_BANGUMI_COMMENT',
+        process.env.SYNC_NEODB_BANGUMI_COMMENT,
+        ['bangumi_prefer', 'overwrite'] as const,
+        'bangumi_prefer',
+      ),
+      statusGuard: parseEnum(
+        'SYNC_STATUS_GUARD',
+        process.env.SYNC_STATUS_GUARD,
+        ['off', 'no-downgrade'] as const,
+        'off',
+      ),
+      mapPrivate: envEnabled('SYNC_MAP_PRIVATE', false),
+      progress: envEnabled('SYNC_PROGRESS', false),
+      includeSp: envEnabled('SYNC_INCLUDE_SP', false),
+      incremental: envEnabled('SYNC_INCREMENTAL', true),
+      stateFile: envString('SYNC_STATE_FILE', '.cache/sync-state.json'),
+      fullSync: envEnabled('FULL_SYNC', false),
+      unmatchedLog: envString('SYNC_UNMATCHED_LOG', '.cache/unmatched.json'),
+      reportFile: envString('SYNC_REPORT_FILE', '.cache/sync-report.json'),
+      summaryFile: envString('SYNC_SUMMARY_FILE', '.cache/sync-summary.md'),
+    },
+  };
+}
+
+/** 打印最终生效的配置，便于在日志里核对、在不同运行之间 diff。 */
+export function describeSyncConfig(config: SyncConfig): string {
+  const s = config.sync;
+  const categories =
+    s.categories.mode === 'all'
+      ? '全部'
+      : s.categories.mode === 'none'
+        ? `无（原文: ${s.categories.raw}）`
+        : [...s.categories.values].join(',');
+  return [
+    '生效配置:',
+    `  NeoDB: ${config.neodb.baseUrl}（延迟 ${config.neodb.delayMs}ms，页上限 ${config.neodb.maxPages}，token ${config.neodb.token ? '已设置' : '未设置'}）`,
+    `  Bangumi: token ${config.bangumi.token ? '已设置' : '未设置'}（延迟 ${config.bangumi.delayMs}ms）`,
+    `  书架: ${s.shelfTypes.join(',')}`,
+    `  分类白名单: ${categories}`,
+    `  dry-run: ${s.dryRun ? 1 : 0}｜全量: ${s.fullSync ? 1 : 0}｜条目上限: ${s.maxItems}`,
+    `  评分: ${s.ratingProfile}｜短评: ${s.commentProfile}｜状态保护: ${s.statusGuard}`,
+    `  可见性映射: ${s.mapPrivate ? 1 : 0}｜进度拉满: ${s.progress ? 1 : 0}（SP: ${s.includeSp ? 1 : 0}）`,
+    `  增量: ${s.incremental && !s.fullSync ? 1 : 0}｜状态文件: ${s.stateFile}`,
+    `  年份容差: ${s.yearTolerance}`,
+  ].join('\n');
+}
+
+// ─── 增量状态 ───────────────────────────────────────────────────────────
+
+export type SyncState = Record<string, string>;
+
+/** 条目指纹：书架状态、评分、短评、可见性任一变化都会改变指纹。 */
+export function fingerprintMark(mark: NeodbShelfMark): string {
+  return createHash('sha1')
+    .update(
+      [
+        mark.item.uuid,
+        mark.shelf_type,
+        mark.rating_grade ?? 0,
+        mark.comment_text ?? '',
+        mark.visibility ?? '',
+      ].join('|'),
+    )
+    .digest('hex');
+}
+
+export function loadSyncState(path: string): SyncState {
+  if (!existsSync(path)) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { marks?: SyncState };
+    return parsed.marks ?? {};
+  } catch {
+    consola.warn(`增量状态文件损坏，按空状态处理: ${path}`);
+    return {};
+  }
+}
+
+export function saveSyncState(path: string, state: SyncState): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), marks: state }),
+    'utf8',
+  );
+}
+
+/** 允许 category 判断的辅助（供测试复用）。 */
+export function categoryAllowed(
+  allowlist: CategoryAllowlist,
+  category: string | undefined,
+): boolean {
+  if (allowlist.mode === 'all') return true;
+  if (allowlist.mode === 'none') return false;
+  return category != null && allowlist.values.has(category);
+}

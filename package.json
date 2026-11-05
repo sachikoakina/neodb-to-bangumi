@@ -1,0 +1,48 @@
+{
+  "name": "neodb-to-bangumi",
+  "version": "0.1.0",
+  "description": "把 NeoDB 书架的标记、评分、短评与进度迁移到 Bangumi 收藏",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "sync": "tsx src/index.ts",
+    "probe:neodb": "tsx scripts/probe-neodb-shelf.ts",
+    "verify:mapping": "tsx scripts/verify-mapping.ts",
+    "verify:matching": "tsx scripts/verify-matching.ts",
+    "verify:docs": "tsx scripts/verify-docs.ts",
+    "test": "vitest run",
+    "verify:all": "npm run test && npm run verify:mapping && npm run verify:matching && npm run verify:docs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "neodb",
+    "bangumi",
+    "migration",
+    "sync",
+    "shelf"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.8",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.54.0",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "consola": "^3.4.2",
+    "dotenv": "^18.0.0",
+    "got": "^16.0.0"
+  }
+}
