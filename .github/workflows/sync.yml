@@ -1,0 +1,139 @@
+# 定时 / 手动迁移：NeoDB 书架 → Bangumi 收藏。
+# 手动触发时，GitHub Actions 页面会出现「Run workflow」按钮（workflow_dispatch）。
+name: sync
+
+# 最小权限：本工作流只读取仓库并与外部 API 通信。
+permissions:
+  contents: read
+
+# 绝不让两次迁移重叠：第二次会与第一次争用 `.cache/` 状态，并可能重复写入 Bangumi。
+# `cancel-in-progress: false` 是刻意的：中断一次做到一半的迁移，比让下一次排队更糟。
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch: # 手动触发按钮
+    inputs:
+      # 全量重导：本次运行取消 SYNC_MAX_ITEMS / NEODB_MAX_PAGES 上限，并忽略增量。
+      # 默认 false，让「手动跑一次做快速检查」仍然受封顶约束。
+      full_sync:
+        description: '全量迁移（忽略条目/页数上限、关闭增量）— 较慢'
+        type: boolean
+        default: false
+      # 只算不写：核对计划与未匹配清单，不产生任何写入。
+      dry_run:
+        description: '只输出计划，不写入 Bangumi'
+        type: boolean
+        default: false
+      # 本次运行临时开启进度拉满（默认仍受 SYNC_PROGRESS 变量控制）。
+      progress:
+        description: '本次拉满 complete 条目的进度（书籍/电影/分集）'
+        type: boolean
+        default: false
+  schedule:
+    # 每天上海时间 03:15（UTC+8，无夏令时）→ 前一日 19:15 UTC。
+    # 与仓库 Variables 中的增量状态缓存配合，每轮继续推进尚未同步的条目。
+    - cron: '15 19 * * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # 常规运行受 SYNC_MAX_ITEMS / NEODB_MAX_PAGES 与请求节流约束，一小时足够；
+    # 全量导入没有这些上限，单独给 180 分钟。
+    timeout-minutes: ${{ inputs.full_sync && 180 || 60 }}
+
+    env:
+      NEODB_API_TOKEN: ${{ secrets.NEODB_API_TOKEN }}
+      BANGUMI_ACCESS_TOKEN: ${{ secrets.BANGUMI_ACCESS_TOKEN }}
+
+      # ── 连接与节流（仓库 Variables 覆盖，未设置时用默认值）──
+      NEODB_BASE_URL: ${{ vars.NEODB_BASE_URL || 'https://neodb.social' }}
+      NEODB_REQUEST_DELAY_MS: ${{ vars.NEODB_REQUEST_DELAY_MS || '300' }}
+      NEODB_MAX_PAGES: ${{ vars.NEODB_MAX_PAGES || '10' }}
+      BANGUMI_USER_AGENT: ${{ vars.BANGUMI_USER_AGENT || 'neodb-to-bangumi/1.0 (+https://github.com/sachikoakina/neodb-to-bangumi)' }}
+      BANGUMI_REQUEST_DELAY_MS: ${{ vars.BANGUMI_REQUEST_DELAY_MS || '400' }}
+
+      # ── 迁移行为 ──
+      # 本次运行的输入优先；否则取 Variables 的值（默认关闭）。
+      FULL_SYNC: ${{ inputs.full_sync && '1' || vars.FULL_SYNC || '0' }}
+      SYNC_DRY_RUN: ${{ inputs.dry_run && '1' || vars.SYNC_DRY_RUN || '0' }}
+      SYNC_PROGRESS: ${{ inputs.progress && '1' || vars.SYNC_PROGRESS || '0' }}
+      SYNC_INCLUDE_SP: ${{ vars.SYNC_INCLUDE_SP || '0' }}
+      SYNC_SHELF_TYPES: ${{ vars.SYNC_SHELF_TYPES || 'wishlist,progress,complete,dropped' }}
+      SYNC_CATEGORIES: ${{ vars.SYNC_CATEGORIES || 'book,movie,tv,music,game' }}
+      SYNC_YEAR_TOLERANCE: ${{ vars.SYNC_YEAR_TOLERANCE || '1' }}
+      SYNC_NEODB_BANGUMI_RATING: ${{ vars.SYNC_NEODB_BANGUMI_RATING || 'bangumi_prefer' }}
+      SYNC_NEODB_BANGUMI_COMMENT: ${{ vars.SYNC_NEODB_BANGUMI_COMMENT || 'bangumi_prefer' }}
+      SYNC_STATUS_GUARD: ${{ vars.SYNC_STATUS_GUARD || 'off' }}
+      SYNC_MAP_PRIVATE: ${{ vars.SYNC_MAP_PRIVATE || '0' }}
+      SYNC_MAX_ITEMS: ${{ vars.SYNC_MAX_ITEMS || '50' }}
+
+      # runner 是临时的，增量状态靠下方的 cache restore/save 跨运行保留；
+      # 全量运行会忽略它，从头走一遍。
+      SYNC_INCREMENTAL: ${{ vars.SYNC_INCREMENTAL || '1' }}
+      SYNC_STATE_FILE: ${{ vars.SYNC_STATE_FILE || '.cache/sync-state.json' }}
+      # 未匹配清单随本轮 artifact 上传，供人工核对后在 NeoDB 补 Bangumi 外链。
+      SYNC_UNMATCHED_LOG: ${{ vars.SYNC_UNMATCHED_LOG || '.cache/unmatched.json' }}
+      SYNC_REPORT_FILE: ${{ vars.SYNC_REPORT_FILE || '.cache/sync-report.json' }}
+      SYNC_SUMMARY_FILE: ${{ vars.SYNC_SUMMARY_FILE || '.cache/sync-summary.md' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+
+      - run: npm ci
+
+      # 用离线断言给迁移设门禁：不需要凭据与网络，几秒即可；规则被改坏时
+      # 应当**在**任何写入 Bangumi 之前就拦下这一轮。
+      - run: npm run verify:all
+
+      # 增量指纹：缓存条目不可变，键带 run id，前缀让最新一份被恢复。
+      - name: Restore the incremental state
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/sync-state.json
+          key: sync-state-${{ github.run_id }}
+          restore-keys: |
+            sync-state-
+
+      - name: Record UTC run start
+        id: run_start
+        run: echo "value=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_OUTPUT"
+
+      - run: npm run sync
+
+      # 报告与同步成败解耦：失败的那一轮才最需要摘要。作业仍会因上一步失败变红。
+      - name: Publish the job summary
+        if: always()
+        run: |
+          if [ -s .cache/sync-summary.md ]; then
+            cat .cache/sync-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '> 这一轮没有产出摘要文件：进程在打印汇总之前就退出了，原因见上一节的日志。' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # 无论成败都保存状态：被超时杀掉的运行必须能续上，否则大书架永远走不到底。
+      - name: Save the incremental state
+        if: always() && !inputs.full_sync
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/sync-state.json
+          key: sync-state-${{ github.run_id }}
+
+      - name: Upload the run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-report-${{ github.run_id }}-${{ steps.run_start.outputs.value }}
+          path: |
+            .cache/sync-report.json
+            .cache/sync-summary.md
+            .cache/unmatched.json
+          if-no-files-found: warn
+          retention-days: 7

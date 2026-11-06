@@ -43,6 +43,22 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 | `SYNC_MAP_PRIVATE`           | `0`              | NeoDB 私密 → Bangumi private    |
 | `FULL_SYNC`                  | `0`              | 全量模式：忽略上限、关闭增量    |
 
+## 定时运行与手动触发
+
+`.github/workflows/sync.yml` 是定时任务入口，提供两种触发方式：
+
+| 方式 | 操作                                                      | 说明                                                              |
+| ---- | --------------------------------------------------------- | ----------------------------------------------------------------- |
+| 定时 | 每天上海时间 03:15（前一日 19:15 UTC）                    | 增量推进：缓存 `.cache/sync-state.json`，已同步条目不消耗条目预算 |
+| 手动 | 仓库 → Actions → 左侧 `sync` → 右侧 **Run workflow** 按钮 | 可选 `full_sync` / `dry_run` / `progress` 三个输入                |
+
+手动输入优先于仓库 Variables，且只对本次运行生效，不会残留到定时任务。运行前会先跑 `verify:all` 离线断言门禁；无论成败都会发布 Job Summary，并上传报告、摘要与未匹配清单三个 artifact（保留 7 天）。
+
+需要在仓库 Settings 配置：
+
+- Secrets：`NEODB_API_TOKEN`、`BANGUMI_ACCESS_TOKEN`；
+- Variables（可选，未设置时用代码默认值）：`.env.example` 中除凭据外的全部配置项。
+
 ## 运行结果
 
 每轮输出统一 `PathReport`（满足 `scanned = written + unchanged + skipped + unresolved + failed`）、Markdown 摘要与机器可读 JSON。`failed` 条目使退出码为 1，认证中止为 2。

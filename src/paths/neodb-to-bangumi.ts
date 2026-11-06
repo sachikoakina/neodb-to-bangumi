@@ -119,6 +119,10 @@ export default async function runNeodbToBangumi(
 
   consola.info(`Bangumi 账号: ${me.nickname || me.username}`);
 
+  // 配额只统计真正进入处理流程的条目：增量跳过不消耗预算。否则定时运行每天都会在
+  // 前 maxItems 条已同步条目上原地打转，永远走不到新增条目。
+  let budgetUsed = 0;
+
   for (const shelfType of config.sync.shelfTypes) {
     consola.info(`开始遍历书架: ${shelfType}`);
     const result = await walkShelfPages(
@@ -126,10 +130,21 @@ export default async function runNeodbToBangumi(
       config.sync.fullSync ? Number.MAX_SAFE_INTEGER : config.neodb.maxPages,
       async (marks) => {
         for (const mark of marks) {
-          if (!config.sync.fullSync && report.scanned >= config.sync.maxItems) {
+          // 增量跳过在配额判断之前：已同步条目既不计扫描配额，也不消耗条目预算。
+          if (
+            config.sync.incremental &&
+            !config.sync.fullSync &&
+            ctx.state[mark.item.uuid] === fingerprintMark(mark)
+          ) {
+            record(report, 'skipped');
+            report.scanned += 1;
+            continue;
+          }
+          if (!config.sync.fullSync && budgetUsed >= config.sync.maxItems) {
             return false;
           }
           report.scanned += 1;
+          budgetUsed += 1;
           const outcome = await processMark(mark, ctx);
           record(report, outcome);
         }
@@ -164,15 +179,6 @@ async function processMark(
   const item = mark.item;
   const label = item.display_title || item.title || item.uuid;
   const fingerprint = fingerprintMark(mark);
-
-  // 增量跳过：指纹未变的条目上轮已同步。
-  if (
-    config.sync.incremental &&
-    !config.sync.fullSync &&
-    ctx.state[item.uuid] === fingerprint
-  ) {
-    return 'skipped';
-  }
 
   // 分类白名单（三态，写错配置时已在解析期失败在关闭一侧）。
   if (!categoryAllowed(config.sync.categories, item.category)) {
