@@ -30,18 +30,82 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 
 ## 配置
 
-全部配置项见 [.env.example](.env.example)（每项含默认值与用途说明）。要点：
+配置来源优先级（仅 Actions 手动运行涉及）：**手动输入 > 仓库 Variables > 代码默认值**；本地运行只读 `.env` 与进程环境变量。
 
-| 配置                         | 默认             | 说明                            |
-| ---------------------------- | ---------------- | ------------------------------- |
-| `SYNC_DRY_RUN`               | `0`              | 只输出计划，不写入              |
-| `SYNC_NEODB_BANGUMI_RATING`  | `bangumi_prefer` | 评分：目标非 0 分优先           |
-| `SYNC_NEODB_BANGUMI_COMMENT` | `bangumi_prefer` | 短评：只填空不清空              |
-| `SYNC_STATUS_GUARD`          | `off`            | `no-downgrade` 保护现有「看过」 |
-| `SYNC_PROGRESS`              | `0`              | 进度拉满总开关，显式启用        |
-| `SYNC_INCLUDE_SP`            | `0`              | 分集拉满是否纳入 SP             |
-| `SYNC_MAP_PRIVATE`           | `0`              | NeoDB 私密 → Bangumi private    |
-| `FULL_SYNC`                  | `0`              | 全量模式：忽略上限、关闭增量    |
+按敏感性分为两类，注入位置不同：
+
+| 归属         | 含义                                  | 本地                    | GitHub Actions                                   | 是否可公开     |
+| ------------ | ------------------------------------- | ----------------------- | ------------------------------------------------ | -------------- |
+| **Secret**   | 密钥/令牌，泄露即可被他人读写你的账号 | `.env`（已被 git 忽略） | Settings → Secrets and variables → **Secrets**   | 否，绝不外泄   |
+| **Variable** | 普通配置，泄露不造成账号风险          | `.env`                  | Settings → Secrets and variables → **Variables** | 是，可写进文档 |
+
+> 条目清单以 [.env.example](.env.example) 为唯一模板；`npm run verify:docs` 会校验代码读取项与该模板双向一致，新增配置项时两处必须同步。
+
+### 一、Secret（密钥/敏感信息，共 2 项）
+
+| 名称                   | 数据类型 | 必填 | 用途                                | 注意事项                                                                                         |
+| ---------------------- | -------- | ---- | ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `NEODB_API_TOKEN`      | string   | 是   | 读取 NeoDB 书架（只读，不写 NeoDB） | 实例 `/developer/` 授权获取；泄露后立即在实例内吊销并重新授权。未设置时链路直接中止              |
+| `BANGUMI_ACCESS_TOKEN` | string   | 是   | 读取/写入 Bangumi 收藏              | `https://next.bgm.tv/demo/access-token` 生成；该令牌具备写权限，泄露影响最大，务必只放入 Secrets |
+
+**保密要求**：不要把 Secret 写进 README、提交历史、issue、截图或日志；项目运行日志不会打印令牌原值。`SYNC_UNMATCHED_LOG` 与报告只记录条目标题与链接，不含凭据。
+
+### 二、Variable（普通变量/非敏感配置，共 22 项）
+
+#### 1. 连接与节流（5 项）
+
+| 名称                       | 数据类型 | 默认值                             | 用途                                        |
+| -------------------------- | -------- | ---------------------------------- | ------------------------------------------- |
+| `NEODB_BASE_URL`           | string   | `https://neodb.social`             | NeoDB 实例地址；自建实例时指向你的域名      |
+| `NEODB_REQUEST_DELAY_MS`   | number   | `300`                              | 书架请求间隔（毫秒），规避限流              |
+| `NEODB_MAX_PAGES`          | number   | `10`                               | 每个书架最大遍历页数；`FULL_SYNC=1` 时忽略  |
+| `BANGUMI_USER_AGENT`       | string   | `neodb-to-bangumi/1.0 (+仓库链接)` | Bangumi 要求可识别 UA，建议保留真实仓库地址 |
+| `BANGUMI_REQUEST_DELAY_MS` | number   | `400`                              | Bangumi 请求间隔（毫秒）                    |
+
+#### 2. 迁移范围（3 项）
+
+| 名称                  | 数据类型 | 默认值                               | 用途                                                                                                                                             |
+| --------------------- | -------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SYNC_SHELF_TYPES`    | CSV      | `wishlist,progress,complete,dropped` | 要遍历的 NeoDB 书架；可只填 `complete` 等                                                                                                        |
+| `SYNC_CATEGORIES`     | CSV      | `book,movie,tv,music,game`           | 分类白名单，可选 `podcast,performance`（Bangumi 无对应类型，写入侧跳过）。**写错分类名会让白名单整体作废（失败在关闭一侧），本次不同步任何分类** |
+| `SYNC_YEAR_TOLERANCE` | number   | `1`                                  | 标题匹配允许的年份差；仅动画（2）/真人（6）参与过滤                                                                                              |
+
+#### 3. 字段合并与保护（6 项）
+
+| 名称                         | 数据类型 | 默认值           | 用途                                                                                  |
+| ---------------------------- | -------- | ---------------- | ------------------------------------------------------------------------------------- |
+| `SYNC_NEODB_BANGUMI_RATING`  | enum     | `bangumi_prefer` | 评分合并：`bangumi_prefer` 保留目标非 0 分；`overwrite` 用 NeoDB 分覆盖               |
+| `SYNC_NEODB_BANGUMI_COMMENT` | enum     | `bangumi_prefer` | 短评合并：`bangumi_prefer` 只填空；`overwrite` 覆盖（含清空）                         |
+| `SYNC_STATUS_GUARD`          | enum     | `off`            | `no-downgrade` 时现有「看过」不被想看/在看降级                                        |
+| `SYNC_MAP_PRIVATE`           | boolean  | `0`              | `1` 时 NeoDB 私密标记（`visibility=2`）→ Bangumi `private=true`                       |
+| `SYNC_PROGRESS`              | boolean  | `0`              | 进度拉满总开关；`1` 时 complete 条目书籍章节/卷数、电影首集、TV/动画/真人分集拉到上限 |
+| `SYNC_INCLUDE_SP`            | boolean  | `0`              | 分集拉满是否纳入 SP；电影永不处理 SP                                                  |
+
+#### 4. 运行模式（3 项）
+
+| 名称             | 数据类型 | 默认值 | 用途                                                                                     |
+| ---------------- | -------- | ------ | ---------------------------------------------------------------------------------------- |
+| `SYNC_DRY_RUN`   | boolean  | `0`    | `1` = 只输出计划，不写入任何数据                                                         |
+| `SYNC_MAX_ITEMS` | number   | `50`   | 单次运行处理的条目上限；增量跳过的条目不消耗预算。**`0` 不是「无限」**，低于 1 回落为 50 |
+| `FULL_SYNC`      | boolean  | `0`    | `1` = 忽略条目/页数上限并关闭增量跳过；首次迁移使用                                      |
+
+#### 5. 增量与产物（5 项）
+
+| 名称                 | 数据类型 | 默认值                    | 用途                                                       |
+| -------------------- | -------- | ------------------------- | ---------------------------------------------------------- |
+| `SYNC_INCREMENTAL`   | boolean  | `1`                       | 按条目指纹跳过已同步项；`FULL_SYNC=1` 时自动失效           |
+| `SYNC_STATE_FILE`    | path     | `.cache/sync-state.json`  | 增量指纹文件；删除即重新全量比对。CI 通过 cache 跨运行保留 |
+| `SYNC_UNMATCHED_LOG` | path     | `.cache/unmatched.json`   | 未匹配条目名单（upsert 去重），供人工补 Bangumi 外链       |
+| `SYNC_REPORT_FILE`   | path     | `.cache/sync-report.json` | 机器可读运行报告                                           |
+| `SYNC_SUMMARY_FILE`  | path     | `.cache/sync-summary.md`  | Markdown 运行摘要                                          |
+
+### 配置注意事项
+
+1. **布尔值写法**：`1/true/yes/on` 为真，其余为假；空值取默认值。
+2. **非法值处理**：枚举写错会告警并回落到默认值；分类白名单写错则整体作废（不同步任何分类）——刻意失败在关闭一侧，避免误同步。
+3. **相对路径**：三个产物路径与状态文件按进程工作目录解析，目录不存在会自动创建。
+4. **CI 与本地差异**：CI runner 是临时的，增量状态依赖 Actions cache；未匹配清单随 artifact 上传（保留 7 天），不会留在仓库里。
+5. **改配置不改代码**：所有可调项均通过环境变量读取；新增配置项时同步更新 `.env.example` 与本节，否则 `verify:docs` 会失败。
 
 ## 定时运行与手动触发
 
@@ -54,10 +118,7 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 
 手动输入优先于仓库 Variables，且只对本次运行生效，不会残留到定时任务。运行前会先跑 `verify:all` 离线断言门禁；无论成败都会发布 Job Summary，并上传报告、摘要与未匹配清单三个 artifact（保留 7 天）。
 
-需要在仓库 Settings 配置：
-
-- Secrets：`NEODB_API_TOKEN`、`BANGUMI_ACCESS_TOKEN`；
-- Variables（可选，未设置时用代码默认值）：`.env.example` 中除凭据外的全部配置项。
+注入位置见上方[配置](#配置)章节：Secret 两项放入 **Secrets**，其余全部配置项放入 **Variables**（可选，未设置时用代码默认值）。
 
 ## 运行结果
 
