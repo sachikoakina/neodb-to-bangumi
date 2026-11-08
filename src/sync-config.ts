@@ -46,6 +46,7 @@ export const ENV_KEYS: readonly string[] = [
   'FULL_SYNC',
   'FULL_SYNC_CURSOR_FILE',
   'SYNC_UNMATCHED_LOG',
+  'REVIEW_STATE_MAX_AGE_DAYS',
   'SYNC_REPORT_FILE',
   'SYNC_SUMMARY_FILE',
 ];
@@ -192,6 +193,8 @@ export type SyncConfig = {
     fullSync: boolean;
     fullSyncCursorFile: string;
     unmatchedLog: string;
+    /** 待核对名单按 lastSeenAt 老化的天数；0 表示永不清理。 */
+    reviewStateMaxAgeDays: number;
     reportFile: string;
     summaryFile: string;
   };
@@ -261,6 +264,10 @@ export function loadSyncConfig(): SyncConfig {
         '.cache/full-sync-cursor.json',
       ),
       unmatchedLog: envString('SYNC_UNMATCHED_LOG', '.cache/unmatched.json'),
+      reviewStateMaxAgeDays: Math.max(
+        0,
+        Math.floor(envNumber('REVIEW_STATE_MAX_AGE_DAYS', 30)),
+      ),
       reportFile: envString('SYNC_REPORT_FILE', '.cache/sync-report.json'),
       summaryFile: envString('SYNC_SUMMARY_FILE', '.cache/sync-summary.md'),
     },
@@ -288,6 +295,11 @@ export function describeSyncConfig(config: SyncConfig): string {
       `｜进度拉满: ${s.progress ? 1 : 0}（SP: ${s.includeSp ? 1 : 0}，OP/ED: ${s.includeOpEd ? 1 : 0}）`,
     `  增量: ${s.incremental && !s.fullSync ? 1 : 0}｜状态文件: ${s.stateFile}`,
     `  全量游标: ${s.fullSync ? s.fullSyncCursorFile : '未启用（仅 FULL_SYNC=1 使用）'}`,
+    `  待核对名单: ${s.unmatchedLog}（${
+      s.reviewStateMaxAgeDays > 0
+        ? `${s.reviewStateMaxAgeDays} 天未出现后清理`
+        : '永不清理'
+    }）`,
     `  年份容差: ${s.yearTolerance}`,
   ].join('\n');
 }

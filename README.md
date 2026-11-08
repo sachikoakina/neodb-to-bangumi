@@ -51,7 +51,7 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 
 **保密要求**：不要把 Secret 写进 README、提交历史、issue、截图或日志；项目运行日志不会打印令牌原值。`SYNC_UNMATCHED_LOG` 与报告只记录条目标题与链接，不含凭据。
 
-### 二、Variable（普通变量/非敏感配置，共 25 项）
+### 二、Variable（普通变量/非敏感配置，共 26 项）
 
 #### 1. 连接与节流（5 项）
 
@@ -92,23 +92,24 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 | `SYNC_MAX_ITEMS` | number   | `50`   | 单次运行处理的条目上限；增量跳过的条目不消耗预算。**`0` 不是「无限」**，低于 1 回落为 50 |
 | `FULL_SYNC`      | boolean  | `0`    | `1` = 忽略条目/页数上限并关闭增量跳过；首次迁移使用                                      |
 
-#### 5. 增量与产物（6 项）
+#### 5. 增量与产物（7 项）
 
-| 名称                    | 数据类型 | 默认值                         | 用途                                                                  |
-| ----------------------- | -------- | ------------------------------ | --------------------------------------------------------------------- |
-| `SYNC_INCREMENTAL`      | boolean  | `1`                            | 按条目指纹跳过已同步项；`FULL_SYNC=1` 时自动失效                      |
-| `SYNC_STATE_FILE`       | path     | `.cache/sync-state.json`       | 增量指纹文件；删除即重新全量比对。CI 通过 cache 跨运行保留            |
-| `SYNC_UNMATCHED_LOG`    | path     | `.cache/unmatched.json`        | 未匹配/歧义/重复目标名单（upsert 去重），供人工补外链                 |
-| `SYNC_REPORT_FILE`      | path     | `.cache/sync-report.json`      | 机器可读运行报告                                                      |
-| `SYNC_SUMMARY_FILE`     | path     | `.cache/sync-summary.md`       | Markdown 运行摘要（含待核对原因分布）                                 |
-| `FULL_SYNC_CURSOR_FILE` | path     | `.cache/full-sync-cursor.json` | 仅 `FULL_SYNC=1` 使用的分页游标；常规运行不读不写，空页自动清除该书架 |
+| 名称                        | 数据类型 | 默认值                         | 用途                                                                  |
+| --------------------------- | -------- | ------------------------------ | --------------------------------------------------------------------- |
+| `SYNC_INCREMENTAL`          | boolean  | `1`                            | 按条目指纹跳过已同步项；`FULL_SYNC=1` 时自动失效                      |
+| `SYNC_STATE_FILE`           | path     | `.cache/sync-state.json`       | 增量指纹文件；删除即重新全量比对。CI 通过 cache 跨运行保留            |
+| `SYNC_UNMATCHED_LOG`        | path     | `.cache/unmatched.json`        | 未匹配/歧义/重复目标名单（upsert 去重），供人工补外链                 |
+| `REVIEW_STATE_MAX_AGE_DAYS` | number   | `30`                           | 名单按 `lastSeenAt` 老化的天数；`0` 永不清理；不按「本轮未出现」淘汰  |
+| `SYNC_REPORT_FILE`          | path     | `.cache/sync-report.json`      | 机器可读运行报告                                                      |
+| `SYNC_SUMMARY_FILE`         | path     | `.cache/sync-summary.md`       | Markdown 运行摘要（含待核对原因分布）                                 |
+| `FULL_SYNC_CURSOR_FILE`     | path     | `.cache/full-sync-cursor.json` | 仅 `FULL_SYNC=1` 使用的分页游标；常规运行不读不写，空页自动清除该书架 |
 
 ### 配置注意事项
 
 1. **布尔值写法**：`1/true/yes/on` 为真，其余为假；空值取默认值。
 2. **非法值处理**：枚举写错会告警并回落到默认值；分类白名单写错则整体作废（不同步任何分类）——刻意失败在关闭一侧，避免误同步。
 3. **相对路径**：产物、增量状态与全量游标路径均按进程工作目录解析，目录不存在会自动创建。
-4. **CI 与本地差异**：CI runner 是临时的，增量状态与全量游标依赖 Actions cache；未匹配清单随 artifact 上传（保留 7 天），不会留在仓库里。
+4. **CI 与本地差异**：CI runner 是临时的，增量状态、全量游标与待核对名单依赖 Actions cache 跨运行保留；未匹配清单同时发布为 90 天的 `review-state-*-stock` artifact，两种 artifact 的分工见下节。
 5. **改配置不改代码**：所有可调项均通过环境变量读取；新增配置项时同步更新 `.env.example` 与本节，否则 `verify:docs` 会失败。
 
 ## 定时运行与手动触发
@@ -120,9 +121,22 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 | 定时 | 每天上海时间 03:15（前一日 19:15 UTC）                    | 增量推进：缓存 `.cache/sync-state.json`，已同步条目不消耗条目预算 |
 | 手动 | 仓库 → Actions → 左侧 `sync` → 右侧 **Run workflow** 按钮 | 可选 `full_sync` / `dry_run` / `progress` 三个输入                |
 
-全量运行额外缓存 `.cache/full-sync-cursor.json`：被超时杀掉后从停下的那一页继续；空页或走完自动删除该书架游标。常规运行不读不写该文件。
+全量运行额外缓存 `.cache/full-sync-cursor.json`：被超时杀掉后从停下的那一页继续；空页或走完自动删除该书架游标。常规运行不读不写该文件。待核对名单同样跨轮缓存，详见下方「待核对状态载体」。
 
-手动输入优先于仓库 Variables，且只对本次运行生效，不会残留到定时任务。运行前会先跑 `verify:all` 离线断言门禁；无论成败都会发布 Job Summary，并上传一份包含报告、摘要、未匹配清单与全量游标（仅全量时存在）的 artifact（保留 7 天）。
+手动输入优先于仓库 Variables，且只对本次运行生效，不会残留到定时任务。运行前会先跑 `verify:all` 离线断言门禁；无论成败都会发布 Job Summary，并产出两类 artifact：
+
+| artifact                            | 保留  | 内容                                     | 用途             |
+| ----------------------------------- | ----- | ---------------------------------------- | ---------------- |
+| `sync-report-<run_id>-<UTC>`        | 7 天  | 本轮报告、摘要、全量游标（仅全量时存在） | 看本轮发生了什么 |
+| `review-state-<run_id>-<UTC>-stock` | 90 天 | 待核对名单（`unmatched.json`）+ 摘要     | 人工跟进长期缺口 |
+
+### 待核对状态载体
+
+`review-state-*-stock` 是 **artifact，不是仓库文件**。CI 会在 `npm run sync` 前恢复上一轮的 `.cache/unmatched.json`，运行后在同一文件上 upsert 并保存，因此 `firstSeenAt` 能跨轮保留——同一条缺口不会每天重新计时。
+
+清理只按时间：`REVIEW_STATE_MAX_AGE_DAYS`（默认 30，`0` 永不清理）之后仍未再出现的条目会被删除；无效时间戳一律保留。刻意**不**按「本轮未出现」淘汰——单链路没有多路径 coverage 对账，一次分页截断或限流就可能误删真实缺口。
+
+私有仓库请保持 Settings → Actions →「Artifact and log retention」不低于 90 天；该值只能被单次上传缩短，不能被延长。
 
 注入位置见上方[配置](#配置)章节：Secret 两项放入 **Secrets**，其余全部配置项放入 **Variables**（可选，未设置时用代码默认值）。
 

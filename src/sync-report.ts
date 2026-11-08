@@ -115,6 +115,46 @@ export function saveUnmatched(path: string, entries: UnmatchedMap): void {
   writeFileSync(path, JSON.stringify(Object.fromEntries(entries), null, 2), 'utf8');
 }
 
+const DAY_MS = 86_400_000;
+
+/**
+ * 按最后出现时间清理待核对名单。
+ *
+ * 只做「长期未再出现」的老化，不做「本轮未出现就删」——单链路没有多路径
+ * coverage 对账，按轮次淘汰会在一次分页截断或限流后误删真实缺口。
+ *
+ * 规则：
+ * - `maxAgeDays` 非有限数或 <= 0 → 不清理（0 = 永不清理）；
+ * - `lastSeenAt` 无效 → 保留（不能因脏数据误删）；
+ * - 严格早于截止时间才删除，恰好等于截止时间保留。
+ *
+ * 返回新 Map，不修改入参。
+ */
+export function pruneUnmatched(
+  entries: UnmatchedMap,
+  maxAgeDays: number,
+  now: Date = new Date(),
+): { entries: UnmatchedMap; removed: number } {
+  const next = new Map(entries);
+  if (!Number.isFinite(maxAgeDays) || maxAgeDays <= 0) {
+    return { entries: next, removed: 0 };
+  }
+
+  const cutoff = now.getTime() - maxAgeDays * DAY_MS;
+  let removed = 0;
+  for (const [key, entry] of next) {
+    const lastSeen = Date.parse(entry.lastSeenAt);
+    if (Number.isNaN(lastSeen)) {
+      continue;
+    }
+    if (lastSeen < cutoff) {
+      next.delete(key);
+      removed += 1;
+    }
+  }
+  return { entries: next, removed };
+}
+
 // ─── 摘要渲染 ───────────────────────────────────────────────────────────
 
 export type SummaryContext = {

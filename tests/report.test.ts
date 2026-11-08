@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assertReportInvariant,
   createReport,
+  pruneUnmatched,
   record,
   renderSummaryMarkdown,
   upsertUnmatched,
@@ -116,5 +117,59 @@ describe('摘要渲染', () => {
     expect(md).toContain('| 待核对原因 | 条目数 |');
     expect(md).toContain('| no-bangumi-match | 3 |');
     expect(md).toContain('| ambiguous-bangumi-match | 2 |');
+  });
+});
+
+describe('待核对名单老化清理', () => {
+  const now = new Date('2026-11-08T00:00:00.000Z');
+
+  function entry(lastSeenAt: string) {
+    return {
+      source: 'neodb-bangumi' as const,
+      reason: 'no-bangumi-match',
+      title: 'A',
+      itemUrl: 'https://neodb.social/movie/a',
+      firstSeenAt: lastSeenAt,
+      lastSeenAt,
+    };
+  }
+
+  it('过期条目删除，未过期保留；恰好等于截止时间保留', () => {
+    const entries = new Map([
+      ['old', entry('2026-10-01T00:00:00.000Z')],
+      ['exact', entry('2026-10-09T00:00:00.000Z')],
+      ['fresh', entry('2026-11-07T00:00:00.000Z')],
+    ]);
+    const result = pruneUnmatched(entries, 30, now);
+    expect(result.removed).toBe(1);
+    expect([...result.entries.keys()]).toEqual(['exact', 'fresh']);
+  });
+
+  it('maxAgeDays 为 0 或负数时不清理', () => {
+    const entries = new Map([['old', entry('2000-01-01T00:00:00.000Z')]]);
+    expect(pruneUnmatched(entries, 0, now).removed).toBe(0);
+    expect(pruneUnmatched(entries, -5, now).removed).toBe(0);
+    expect(pruneUnmatched(entries, Number.NaN, now).removed).toBe(0);
+  });
+
+  it('无效 lastSeenAt 保留，避免脏数据误删', () => {
+    const entries = new Map([['broken', entry('not-a-date')]]);
+    const result = pruneUnmatched(entries, 30, now);
+    expect(result.removed).toBe(0);
+    expect(result.entries.has('broken')).toBe(true);
+  });
+
+  it('返回新 Map，不修改入参', () => {
+    const entries = new Map([['old', entry('2000-01-01T00:00:00.000Z')]]);
+    const result = pruneUnmatched(entries, 30, now);
+    expect(entries.size).toBe(1);
+    expect(result.entries.size).toBe(0);
+  });
+
+  it('空 Map 返回 removed = 0', () => {
+    expect(pruneUnmatched(new Map(), 30, now)).toEqual({
+      entries: new Map(),
+      removed: 0,
+    });
   });
 });

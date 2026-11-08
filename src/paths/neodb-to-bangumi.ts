@@ -71,6 +71,7 @@ import {
 import {
   createReport,
   loadUnmatched,
+  pruneUnmatched,
   record,
   saveUnmatched,
   upsertUnmatched,
@@ -250,6 +251,17 @@ export default async function runNeodbToBangumi(
   }
 
   if (!config.sync.dryRun) {
+    // 清理必须发生在所有 upsert 之后：否则会把本轮刚刷新过 lastSeenAt 的条目误删。
+    const pruned = pruneUnmatched(unmatched, config.sync.reviewStateMaxAgeDays);
+    if (pruned.removed > 0) {
+      unmatched.clear();
+      for (const [key, value] of pruned.entries) {
+        unmatched.set(key, value);
+      }
+      consola.info(
+        `待核对名单清理：移除 ${pruned.removed} 条（超过 ${config.sync.reviewStateMaxAgeDays} 天未出现）`,
+      );
+    }
     saveUnmatched(config.sync.unmatchedLog, unmatched);
   }
   return {

@@ -77,8 +77,10 @@ jobs:
       SYNC_STATE_FILE: ${{ vars.SYNC_STATE_FILE || '.cache/sync-state.json' }}
       # 仅 FULL_SYNC=1 使用；常规运行不读不写。
       FULL_SYNC_CURSOR_FILE: ${{ vars.FULL_SYNC_CURSOR_FILE || '.cache/full-sync-cursor.json' }}
-      # 未匹配清单随本轮 artifact 上传，供人工核对后在 NeoDB 补 Bangumi 外链。
+      # 未匹配清单：跨轮恢复后在原文件上 upsert，并以 review-state-*-stock artifact 长期保留。
       SYNC_UNMATCHED_LOG: ${{ vars.SYNC_UNMATCHED_LOG || '.cache/unmatched.json' }}
+      # 只按 lastSeenAt 老化，不按「本轮未出现」淘汰；0 表示永不清理。
+      REVIEW_STATE_MAX_AGE_DAYS: ${{ vars.REVIEW_STATE_MAX_AGE_DAYS || '30' }}
       SYNC_REPORT_FILE: ${{ vars.SYNC_REPORT_FILE || '.cache/sync-report.json' }}
       SYNC_SUMMARY_FILE: ${{ vars.SYNC_SUMMARY_FILE || '.cache/sync-summary.md' }}
 
@@ -117,6 +119,15 @@ jobs:
           restore-keys: |
             full-sync-cursor-
 
+      # 待核对名单跨轮恢复：同一文件在上一轮基础上 upsert，firstSeenAt 才能保留。
+      - name: Restore the review state
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/unmatched.json
+          key: review-state-${{ github.run_id }}
+          restore-keys: |
+            review-state-
+
       - name: Record UTC run start
         id: run_start
         run: echo "value=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_OUTPUT"
@@ -149,6 +160,14 @@ jobs:
           path: .cache/full-sync-cursor.json
           key: full-sync-cursor-${{ github.run_id }}
 
+      # 待核对名单：dry-run 不写文件，因此只在文件存在时保存，避免 cache save 失败。
+      - name: Save the review state
+        if: always() && !inputs.dry_run && hashFiles('.cache/unmatched.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/unmatched.json
+          key: review-state-${{ github.run_id }}
+
       - name: Upload the run report
         if: always()
         uses: actions/upload-artifact@v4
@@ -157,7 +176,19 @@ jobs:
           path: |
             .cache/sync-report.json
             .cache/sync-summary.md
-            .cache/unmatched.json
             .cache/full-sync-cursor.json
           if-no-files-found: warn
           retention-days: 7
+
+      # 待核对状态载体：与 7 天的本轮报表分开，长期保留供人工跟进。
+      # artifact 名只用 UTC 时间戳；90 天是公开仓库允许的上限。
+      - name: Upload the review state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-state-${{ github.run_id }}-${{ steps.run_start.outputs.value }}-stock
+          path: |
+            .cache/unmatched.json
+            .cache/sync-summary.md
+          if-no-files-found: warn
+          retention-days: 90
