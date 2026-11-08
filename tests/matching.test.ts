@@ -149,16 +149,37 @@ describe('候选裁决（年份三态 + 歧义）', () => {
     });
   });
 
-  it('书籍/音乐/游戏不参与年份过滤', async () => {
-    const picked = await pickExactMatch(
+  it('书籍参与年份过滤，且单独容差生效', async () => {
+    // 书籍容差（bookTolerance=1）：|1999−2000|=1 在容差内，即使全局容差为 0。
+    const ok = await pickExactMatch(
       [subject({ id: 50, type: 1, date: '1999-01-01' })],
+      2000,
+      0,
+      { bookTolerance: 1 },
+    );
+    expect(ok.status).toBe('matched');
+    // 全局容差：|1999−2020|=21 超差拒绝。
+    const rejected = await pickExactMatch(
+      [subject({ id: 51, type: 1, date: '1999-01-01' })],
       2020,
       1,
     );
-    expect(picked).toEqual({
-      status: 'matched',
-      subject: expect.objectContaining({ id: 50 }),
-    });
+    expect(rejected.status).toBe('no-candidate');
+  });
+
+  it('音乐/游戏参与年份过滤', async () => {
+    const music = await pickExactMatch(
+      [subject({ id: 52, type: 3, date: '2001-05-01' })],
+      2020,
+      1,
+    );
+    expect(music.status).toBe('no-candidate');
+    const game = await pickExactMatch(
+      [subject({ id: 53, type: 4, date: '2001-05-01' })],
+      2001,
+      1,
+    );
+    expect(game.status).toBe('matched');
   });
 
   it('空候选 → no-candidate', async () => {
@@ -294,14 +315,21 @@ describe('证据严格模式（strict，SYNC_MATCH_STRICT=1）', () => {
     expect(picked.status).toBe('no-candidate');
   });
 
-  it('书籍候选不参与严格模式（证据读取方未覆盖，T5 前保持原行为）', async () => {
+  it('书籍候选年份核对通过 → strict 命中', async () => {
     const picked = await pickExactMatch(
-      [subject({ id: 26, type: 1, date: '1999-01-01' })],
+      [subject({ id: 26, type: 1, date: '2020-01-01' })],
       2020,
       1,
       { strict: true },
     );
     expect(picked.status).toBe('matched');
+  });
+
+  it('书籍候选年份无法核对 → strict 持留（书籍无形态证据）', async () => {
+    const held = await pickExactMatch([subject({ id: 54, type: 1 })], 2020, 1, {
+      strict: true,
+    });
+    expect(holdInsufficient(held)).toBe(true);
   });
 
   it('多候选并列 → 歧义（无持留标记，与 strict 持留可区分）', async () => {

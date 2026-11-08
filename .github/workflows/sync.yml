@@ -64,6 +64,8 @@ jobs:
       SYNC_SHELF_TYPES: ${{ vars.SYNC_SHELF_TYPES || 'wishlist,progress,complete,dropped' }}
       SYNC_CATEGORIES: ${{ vars.SYNC_CATEGORIES || 'book,movie,tv,music,game' }}
       SYNC_YEAR_TOLERANCE: ${{ vars.SYNC_YEAR_TOLERANCE || '1' }}
+      # 书籍类（type 1）的年份容差：初版/再版年份口径差异大，可单独放宽。
+      SYNC_YEAR_TOLERANCE_BOOK: ${{ vars.SYNC_YEAR_TOLERANCE_BOOK || '1' }}
       # 匹配严格模式：唯一同名候选证据不足时转待核对，不自动写入（宁可漏配，不可错配）。
       SYNC_MATCH_STRICT: ${{ vars.SYNC_MATCH_STRICT || '1' }}
       SYNC_NEODB_BANGUMI_RATING: ${{ vars.SYNC_NEODB_BANGUMI_RATING || 'bangumi_prefer' }}
@@ -181,6 +183,7 @@ jobs:
             .cache/sync-report.json
             .cache/sync-summary.md
             .cache/full-sync-cursor.json
+            .cache/unmatched-dryrun.json
           if-no-files-found: warn
           retention-days: 7
 

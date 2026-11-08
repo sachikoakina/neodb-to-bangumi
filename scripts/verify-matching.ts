@@ -159,12 +159,14 @@ async function yearChecks(): Promise<void> {
     41,
   );
 
-  // 书籍（type 1）不参与年份过滤，多候选仍因证据不足歧义
+  // 书籍（type 1）参与年份过滤；书籍容差单独放宽
   const book = [subject({ id: 50, type: 1, date: '1999-01-01' })];
   const picked7 = await pickExactMatch(book, 2020, 1);
+  check('书籍超差拒绝', picked7.status, 'no-candidate');
+  const bookNear = await pickExactMatch(book, 2000, 0, { bookTolerance: 1 });
   check(
-    '书籍不参与年份过滤',
-    picked7.status === 'matched' ? picked7.subject.id : null,
+    '书籍单独容差生效',
+    bookNear.status === 'matched' ? bookNear.subject.id : null,
     50,
   );
 
@@ -264,14 +266,27 @@ async function strictChecks(): Promise<void> {
     103,
   );
 
-  // 书籍候选（type 1）不参与严格模式
-  const book = await pickExactMatch([subject({ id: 104, type: 1 })], 2002, 1, {
+  // 书籍候选年份核对通过 → 命中；年份无法核对 → 持留
+  const book = await pickExactMatch(
+    [subject({ id: 104, type: 1, date: '2002-01-01' })],
+    2002,
+    1,
+    {
+      strict: true,
+    },
+  );
+  check(
+    'strict：书籍年份核对通过 → 命中',
+    book.status === 'matched' ? book.subject.id : null,
+    104,
+  );
+  const bookHeld = await pickExactMatch([subject({ id: 105, type: 1 })], 2002, 1, {
     strict: true,
   });
   check(
-    'strict：书籍候选不参与（保持命中）',
-    book.status === 'matched' ? book.subject.id : null,
-    104,
+    'strict：书籍年份无法核对 → 持留',
+    bookHeld.status === 'ambiguous' && bookHeld.hold === 'insufficient-evidence',
+    true,
   );
 }
 

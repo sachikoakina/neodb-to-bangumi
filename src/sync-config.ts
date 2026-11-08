@@ -33,6 +33,7 @@ export const ENV_KEYS: readonly string[] = [
   'SYNC_SHELF_TYPES',
   'SYNC_CATEGORIES',
   'SYNC_YEAR_TOLERANCE',
+  'SYNC_YEAR_TOLERANCE_BOOK',
   'SYNC_MATCH_STRICT',
   'SYNC_MATCH_AUDIT_FILE',
   'SYNC_NEODB_BANGUMI_RATING',
@@ -183,6 +184,10 @@ export type SyncConfig = {
     categories: CategoryAllowlist;
     yearTolerance: number;
     /**
+     * 书籍（type 1）的年份容差：初版/再版年份口径差异大，可单独放宽。
+     */
+    bookYearTolerance: number;
+    /**
      * 匹配严格模式：唯一同名候选若年份无法核对且形态不可判定 → 转待核对，
      * 不自动写入。默认开启——宁可漏配，不可错配。
      */
@@ -237,6 +242,7 @@ export function loadSyncConfig(): SyncConfig {
         process.env.SYNC_CATEGORIES,
       ),
       yearTolerance: Math.max(0, envNumber('SYNC_YEAR_TOLERANCE', 1)),
+      bookYearTolerance: Math.max(0, envNumber('SYNC_YEAR_TOLERANCE_BOOK', 1)),
       matchStrict: envEnabled('SYNC_MATCH_STRICT', true),
       matchAuditFile: envString('SYNC_MATCH_AUDIT_FILE', '.cache/match-audit.json'),
       ratingProfile: parseEnum(
@@ -311,7 +317,7 @@ export function describeSyncConfig(config: SyncConfig): string {
         ? `${s.reviewStateMaxAgeDays} 天未出现后清理`
         : '永不清理'
     }）`,
-    `  年份容差: ${s.yearTolerance}｜匹配严格: ${s.matchStrict ? 1 : 0}`,
+    `  年份容差: ${s.yearTolerance}（书籍: ${s.bookYearTolerance}）｜匹配严格: ${s.matchStrict ? 1 : 0}`,
     `  匹配审计: ${s.matchAuditFile}`,
   ].join('\n');
 }

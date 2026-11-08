@@ -7,6 +7,7 @@
   "scripts": {
     "sync": "tsx src/index.ts",
     "probe:neodb": "tsx scripts/probe-neodb-shelf.ts",
+    "cleanup": "tsx scripts/cleanup-collections.ts",
     "verify:mapping": "tsx scripts/verify-mapping.ts",
     "verify:matching": "tsx scripts/verify-matching.ts",
     "verify:docs": "tsx scripts/verify-docs.ts",

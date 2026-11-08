@@ -49,16 +49,18 @@
    podcast/performance 无对应，直接跳过），
    候选 name/name_cn 经 trim().toLowerCase() 后必须与搜索标题完全相等
 3. 证据裁决：
-   a. 年份过滤（仅动画 2 / 真人 6）：源年份未知不比较；候选未知通过；
-      双方都有 → |候选 − 源| ≤ SYNC_YEAR_TOLERANCE
+   a. 年份过滤（动画 2 / 真人 6 / 书籍 1 / 音乐 3 / 游戏 4）：
+      源年份未知不比较；候选未知通过；
+      双方都有 → |候选 − 源| ≤ 容差（书籍用 SYNC_YEAR_TOLERANCE_BOOK，
+      其余用 SYNC_YEAR_TOLERANCE）
    b. 媒体形态过滤：NeoDB movie/tv 对比 Bangumi platform
       （剧场版/电影→movie；TV/Web/电视剧/动态漫画→tv；
        OVA 等不可判定 → 不拒绝）
    c. 年份接近度打分：唯一最高分 → 命中；并列或全部不可知 → ambiguous
-   d. 严格模式（SYNC_MATCH_STRICT=1，默认）：动画/真人类的唯一候选若
-      年份无法核对（任一侧未知）且双方形态无法相互印证 → 证据不足
-      持留（hold=insufficient-evidence），转 ambiguous 进待核对名单——
-      宁可漏配，不可错配。书籍/音乐/游戏候选的证据读取方未覆盖，不参与
+   d. 严格模式（SYNC_MATCH_STRICT=1，默认）：唯一候选若年份无法核对
+      （任一侧未知）且双方形态无法相互印证（书籍/音乐/游戏无形态证据，
+      等价于仅看年份核对）→ 证据不足持留（hold=insufficient-evidence），
+      转 ambiguous 进待核对名单——宁可漏配，不可错配
 ```
 
 - 不猜、不模糊匹配、不跨分类回退；多候选不再取第一个。

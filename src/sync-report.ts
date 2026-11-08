@@ -208,6 +208,15 @@ export function saveMatchAudit(path: string, doc: MatchAuditDocument): void {
   writeFileSync(path, JSON.stringify(doc, null, 2), 'utf8');
 }
 
+/**
+ * dry-run 视角的待核对名单落盘路径：派生自正式路径（unmatched.json →
+ * unmatched-dryrun.json），不老化、不污染正式文件——dry-run 的价值在于
+ * 「写之前看清楚」，它不应该改变下一次正式运行的起点。
+ */
+export function dryRunUnmatchedPath(path: string): string {
+  return path.replace(/(\.json)?$/i, (ext) => `-dryrun${ext || '.json'}`);
+}
+
 // ─── 摘要渲染 ───────────────────────────────────────────────────────────
 
 export type SummaryContext = {

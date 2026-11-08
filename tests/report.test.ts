@@ -6,6 +6,7 @@ import {
   assertReportInvariant,
   buildMatchAuditDocument,
   createReport,
+  dryRunUnmatchedPath,
   pruneUnmatched,
   record,
   renderSummaryMarkdown,
@@ -223,5 +224,19 @@ describe('匹配审计文档', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('dry-run 待核对路径派生', () => {
+  it('.json 后缀前插入 -dryrun', () => {
+    expect(dryRunUnmatchedPath('.cache/unmatched.json')).toBe(
+      '.cache/unmatched-dryrun.json',
+    );
+  });
+
+  it('无后缀时补 .json', () => {
+    expect(dryRunUnmatchedPath('.cache/unmatched')).toBe(
+      '.cache/unmatched-dryrun.json',
+    );
   });
 });

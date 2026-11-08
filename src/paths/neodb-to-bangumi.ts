@@ -70,6 +70,7 @@ import {
 } from '../sync-config';
 import {
   createReport,
+  dryRunUnmatchedPath,
   loadUnmatched,
   pruneUnmatched,
   record,
@@ -306,6 +307,11 @@ export default async function runNeodbToBangumi(
       );
     }
     saveUnmatched(config.sync.unmatchedLog, unmatched);
+  } else {
+    // dry-run 同样产出待核对名单：写派生文件，不老化、不污染正式文件。
+    const dryRunPath = dryRunUnmatchedPath(config.sync.unmatchedLog);
+    saveUnmatched(dryRunPath, unmatched);
+    consola.info(`dry-run 待核对名单（本轮视角）已写入: ${dryRunPath}`);
   }
   return {
     aborted: ctx.aborted ? 'bangumi-auth' : false,
@@ -369,12 +375,16 @@ async function processMark(
     if (match.auth) {
       throw new AuthAbortError(match.reason);
     }
-    consola.warn(`匹配失败，记 failed（下轮可重试）: ${match.reason} ${label}`);
+    consola.warn(
+      `匹配失败，记 failed（下轮可重试）: uuid=${item.uuid} ${match.reason} ${label}`,
+    );
     return finish('failed', match.reason);
   }
   if (match.kind === 'unresolved') {
     recordUnmatched(ctx, mark, match.reason, label);
-    consola.info(`未匹配 Bangumi 条目（${match.reason}），记入待核对: ${label}`);
+    consola.info(
+      `未匹配 Bangumi 条目（${match.reason}），记入待核对: uuid=${item.uuid} ${label}`,
+    );
     return finish('unresolved', match.reason);
   }
 
@@ -662,6 +672,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
       {
         mediaForm,
         strict: ctx.config.sync.matchStrict,
+        bookTolerance: ctx.config.sync.bookYearTolerance,
         resolveEvidence: (subject) => resolveCandidateEvidence(subject, ctx),
       },
     );
@@ -734,8 +745,8 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
 }
 
 /**
- * 候选证据：年份与媒体形态。只有动画（2）/真人（6）参与，其余类型直接返回
- * 不可判定，避免为书籍/音乐/游戏白读完整条目。
+ * 候选证据：年份与媒体形态。动画/真人/书籍/音乐/游戏都参与年份；
+ * 媒体形态只对动画/真人平台可判定，其余类目自然为 null。
  */
 async function resolveCandidateEvidence(
   subject: BangumiSubject,

@@ -8,7 +8,9 @@
  *    打分；唯一最高分才命中，并列 → ambiguous（不猜）。
  *
  * 年份三态规则保持不变：源年份未知 → 不做年份过滤；候选年份未知 → 通过
- * （缺数据不是反对证据）；双方都有 → 差值在容差内才保留。
+ * （缺数据不是反对证据）；双方都有 → 差值在容差内才保留。覆盖动画（2）/
+ * 真人（6）/书籍（1）/音乐（3）/游戏（4）；书籍有独立容差（初版/再版
+ * 口径差异，`SYNC_YEAR_TOLERANCE_BOOK`）。
  *
  * 媒体形态只在双方都能判定时生效：NeoDB `category=movie/tv` 对比 Bangumi
  * `platform`（剧场版/电影 → movie；TV/Web/电视剧/动态漫画 → tv）。OVA 等
@@ -112,12 +114,12 @@ export function neodbItemYear(
 }
 
 /**
- * 只有动画（2）与真人（6）参与年份过滤。
- * 书籍/音乐/游戏的发行年口径不同，年份对不上更可能是数据形态问题，
- * 而不是「不是同一部作品」的证据。
+ * 参与年份软过滤的类型：动画（2）/真人（6）/书籍（1）/音乐（3）/游戏（4）。
+ * 书籍存在初版/再版年份口径差异，单独走 `SYNC_YEAR_TOLERANCE_BOOK`；
+ * 其余类目沿用 `SYNC_YEAR_TOLERANCE`。
  */
 export function isYearFilterType(type: BangumiSubject['type']): boolean {
-  return type === 2 || type === 6;
+  return type === 1 || type === 2 || type === 3 || type === 4 || type === 6;
 }
 
 /** NeoDB 分类 → 可判定的媒体形态；book/music/game 等返回 null。 */
@@ -169,11 +171,17 @@ export type MatchPickOptions = {
   /** 由调用方注入证据读取（可能需要读完整条目），测试可传普通函数。 */
   resolveEvidence?: (subject: BangumiSubject) => Promise<MatchEvidence> | MatchEvidence;
   /**
-   * 严格模式：类型 2/6 的唯一候选若「年份无法核对（任一侧未知）」且
-   * 「双方形态无法相互印证」，不自动命中，转 ambiguous 并标记
-   * `hold: 'insufficient-evidence'`。默认关闭（保持三态原语义）。
+   * 严格模式：唯一候选若「年份无法核对（任一侧未知）」且「双方形态无法
+   * 相互印证」（书籍/音乐/游戏没有形态证据，等价于仅看年份核对），
+   * 不自动命中，转 ambiguous 并标记 `hold: 'insufficient-evidence'`。
+   * 默认关闭（保持三态原语义）。
    */
   strict?: boolean;
+  /**
+   * 书籍（type 1）的年份容差：初版/再版年份口径差异大，可单独放宽；
+   * 未提供时跟随 `tolerance`。其余类目不使用该值。
+   */
+  bookTolerance?: number;
 };
 
 /**
@@ -207,6 +215,7 @@ export async function pickExactMatch(
     }));
 
   const allowedDrift = Math.max(0, tolerance);
+  const bookDrift = Math.max(0, options.bookTolerance ?? tolerance);
   const viable: Array<{
     subject: BangumiSubject;
     distance: number | null;
@@ -216,11 +225,13 @@ export async function pickExactMatch(
   for (const candidate of candidates) {
     const evidence = await resolveEvidence(candidate);
 
+    // 书籍单独容差（初版/再版口径），其余类目用全局容差。
+    const drift = candidate.type === 1 ? bookDrift : allowedDrift;
     if (
       isYearFilterType(candidate.type) &&
       expectedYear != null &&
       evidence.year != null &&
-      Math.abs(evidence.year - expectedYear) > allowedDrift
+      Math.abs(evidence.year - expectedYear) > drift
     ) {
       continue;
     }
@@ -248,8 +259,8 @@ export async function pickExactMatch(
     // 严格模式下的「证据不足持留」：三态规则把候选/源任一侧的年份缺失当成
     // 「通过」，形态不可判定也不拒绝——同名候选因此可能零证据命中。此处要求
     // 唯一候选至少有一项正向佐证：年份经双方核对（distance 已算出），或双方
-    // 形态均可判定（走到这里说明形态未冲突，即互证）。书籍/音乐/游戏候选
-    // 的证据读取方未覆盖，不参与此规则。
+    // 形态均可判定（走到这里说明形态未冲突，即互证）。书籍/音乐/游戏没有
+    // 形态证据，只有年份核对这一条路径。
     const formVerified = only.evidence.mediaForm != null && options.mediaForm != null;
     if (
       options.strict &&

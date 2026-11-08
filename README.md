@@ -63,14 +63,15 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 | `BANGUMI_USER_AGENT`       | string   | `neodb-to-bangumi/1.0 (+仓库链接)` | Bangumi 要求可识别 UA，建议保留真实仓库地址 |
 | `BANGUMI_REQUEST_DELAY_MS` | number   | `400`                              | Bangumi 请求间隔（毫秒）                    |
 
-#### 2. 迁移范围（4 项）
+#### 2. 迁移范围（5 项）
 
-| 名称                  | 数据类型 | 默认值                               | 用途                                                                                                                                             |
-| --------------------- | -------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SYNC_SHELF_TYPES`    | CSV      | `wishlist,progress,complete,dropped` | 要遍历的 NeoDB 书架；可只填 `complete` 等                                                                                                        |
-| `SYNC_CATEGORIES`     | CSV      | `book,movie,tv,music,game`           | 分类白名单，可选 `podcast,performance`（Bangumi 无对应类型，写入侧跳过）。**写错分类名会让白名单整体作废（失败在关闭一侧），本次不同步任何分类** |
-| `SYNC_YEAR_TOLERANCE` | number   | `1`                                  | 标题匹配允许的年份差；仅动画（2）/真人（6）参与过滤                                                                                              |
-| `SYNC_MATCH_STRICT`   | boolean  | `1`                                  | 匹配严格模式：唯一同名候选年份无法核对且形态不可判定时转待核对，不自动写入（宁可漏配，不可错配）；`0` = 证据缺失照写（旧行为）                   |
+| 名称                       | 数据类型 | 默认值                               | 用途                                                                                                                                             |
+| -------------------------- | -------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SYNC_SHELF_TYPES`         | CSV      | `wishlist,progress,complete,dropped` | 要遍历的 NeoDB 书架；可只填 `complete` 等                                                                                                        |
+| `SYNC_CATEGORIES`          | CSV      | `book,movie,tv,music,game`           | 分类白名单，可选 `podcast,performance`（Bangumi 无对应类型，写入侧跳过）。**写错分类名会让白名单整体作废（失败在关闭一侧），本次不同步任何分类** |
+| `SYNC_YEAR_TOLERANCE`      | number   | `1`                                  | 标题匹配允许的年份差；动画（2）/真人（6）/书籍（1）/音乐（3）/游戏（4）参与过滤                                                                  |
+| `SYNC_YEAR_TOLERANCE_BOOK` | number   | `1`                                  | 书籍类（type 1）单独的年份容差；初版/再版年份口径差异大，可单独放宽                                                                              |
+| `SYNC_MATCH_STRICT`        | boolean  | `1`                                  | 匹配严格模式：唯一同名候选年份无法核对且形态不可判定时转待核对，不自动写入（宁可漏配，不可错配）；`0` = 证据缺失照写（旧行为）                   |
 
 #### 3. 字段合并与保护（8 项）
 
@@ -138,9 +139,25 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 
 清理只按时间：`REVIEW_STATE_MAX_AGE_DAYS`（默认 30，`0` 永不清理）之后仍未再出现的条目会被删除；无效时间戳一律保留。刻意**不**按「本轮未出现」淘汰——单链路没有多路径 coverage 对账，一次分页截断或限流就可能误删真实缺口。
 
+dry-run 不写正式名单：本轮视角的待核对名单会落到派生路径 `.cache/unmatched-dryrun.json`（由 `SYNC_UNMATCHED_LOG` 派生），并随 7 天报表 artifact 上传——预演不会改变下一次正式运行的起点。
+
 私有仓库请保持 Settings → Actions →「Artifact and log retention」不低于 90 天；该值只能被单次上传缩短，不能被延长。
 
 注入位置见上方[配置](#配置)章节：Secret 两项放入 **Secrets**，其余全部配置项放入 **Variables**（可选，未设置时用代码默认值）。
+
+## 错配清理
+
+匹配审计（`match-audit.json`）复核出错配后，用清理脚本按 subject 清单撤销：
+
+```bash
+npm run cleanup -- audit/cleanup-list.txt                  # dry：只打印计划
+npm run cleanup -- audit/cleanup-list.txt --apply          # 重置已点亮的分集（type=0）
+npm run cleanup -- audit/cleanup-list.txt --apply --set-type 1   # 同时把收藏改回「想看」
+```
+
+- 分集重置与收藏状态改写（`--set-type`，可选）走已文档化的 v0 端点，默认 dry、`--apply` 才写，幂等可重跑，结果写回 `<清单>.cleanup-report.json`；
+- **收藏本体删除没有 v0 API 端点**：请按脚本输出的链接在 bangumi.tv 条目页「收藏管理 → 取消收藏」手动完成；
+- 清单格式：每行一个 subject id，`#` 为注释。端点核对依据 bangumi/api 官方 v0 规范。
 
 ## 运行结果
 
