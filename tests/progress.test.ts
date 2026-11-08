@@ -25,7 +25,7 @@ describe('分集拉满', () => {
     expect(plan.missing).toEqual([2]);
   });
 
-  it('TV：includeSp 才纳入 SP，OP/ED 永不纳入', () => {
+  it('TV：includeSp 才纳入 SP，默认不纳入 OP/ED', () => {
     const eps = episodes([1, 0, 1], [2, 1, 2], [3, 2, 3]);
     expect(
       planEpisodeProgress(eps, states(), {
@@ -59,6 +59,34 @@ describe('分集拉满', () => {
         collected: true,
       }).reason,
     ).toBe('no-episodes');
+  });
+
+  it('OP/ED 默认不纳入，开启后纳入 type 2/3', () => {
+    const eps = episodes([1, 0, 1], [2, 2, 2], [3, 3, 3]);
+    expect(
+      planEpisodeProgress(eps, states(), {
+        isMovie: false,
+        includeSp: false,
+        collected: true,
+      }).target,
+    ).toEqual([1]);
+    expect(
+      planEpisodeProgress(eps, states(), {
+        isMovie: false,
+        includeSp: false,
+        includeOpEd: true,
+        collected: true,
+      }).target,
+    ).toEqual([1, 2, 3]);
+  });
+
+  it('电影永不纳入 SP 与 OP/ED', () => {
+    const plan = planEpisodeProgress(
+      episodes([1, 0, 1], [2, 1, 2], [3, 2, 3], [4, 3, 4]),
+      states(),
+      { isMovie: true, includeSp: true, includeOpEd: true, collected: true },
+    );
+    expect(plan.target).toEqual([1]);
   });
 
   it('未收藏时不发任何请求', () => {

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   mapShelfType,
-  mapVisibilityToPrivate,
   mergeComment,
   mergeRating,
   neodbCategoryToBangumiSubjectTypes,
+  planBangumiPrivate,
 } from '../src/rules/neodb-bangumi-mapping';
 
 describe('状态映射', () => {
@@ -79,11 +79,48 @@ describe('短评合并', () => {
   });
 });
 
-describe('可见性映射', () => {
-  it('NeoDB 私密(2) → Bangumi private', () => {
-    expect(mapVisibilityToPrivate(2)).toBe(true);
-    expect(mapVisibilityToPrivate(0)).toBe(false);
-    expect(mapVisibilityToPrivate(1)).toBe(false);
-    expect(mapVisibilityToPrivate(undefined)).toBe(false);
+describe('隐私：target / source 双模式', () => {
+  it('target 模式统一使用配置值', () => {
+    expect(
+      planBangumiPrivate({ mode: 'target', targetPrivate: true, sourceVisibility: 0 }),
+    ).toEqual({ private: true, reason: 'target' });
+    expect(
+      planBangumiPrivate({
+        mode: 'target',
+        targetPrivate: false,
+        sourceVisibility: 2,
+        existingPrivate: true,
+      }),
+    ).toEqual({ private: false, reason: 'target' });
+  });
+
+  it('source 模式：私密 → true，公开/仅关注者 → false', () => {
+    expect(
+      planBangumiPrivate({ mode: 'source', targetPrivate: false, sourceVisibility: 2 }),
+    ).toEqual({ private: true, reason: 'source-private' });
+    expect(
+      planBangumiPrivate({ mode: 'source', targetPrivate: true, sourceVisibility: 0 }),
+    ).toEqual({ private: false, reason: 'source-public' });
+    expect(
+      planBangumiPrivate({ mode: 'source', targetPrivate: true, sourceVisibility: 1 }),
+    ).toEqual({ private: false, reason: 'source-public' });
+  });
+
+  it('source 缺失：保留目标现值；无目标才用配置兜底', () => {
+    expect(
+      planBangumiPrivate({
+        mode: 'source',
+        targetPrivate: false,
+        sourceVisibility: undefined,
+        existingPrivate: true,
+      }),
+    ).toEqual({ private: true, reason: 'source-missing' });
+    expect(
+      planBangumiPrivate({
+        mode: 'source',
+        targetPrivate: true,
+        sourceVisibility: null,
+      }),
+    ).toEqual({ private: true, reason: 'source-missing' });
   });
 });

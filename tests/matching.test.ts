@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bangumiPlatformMediaForm,
   bangumiSubjectYear,
   exactMatches,
   extractBangumiSubjectId,
+  neodbCategoryToMediaForm,
   neodbItemYear,
-  pickExactMatchByYear,
+  pickExactMatch,
   titleCandidates,
 } from '../src/rules/neodb-bangumi-matching';
 import type { BangumiSubject, NeodbItem } from '../src/types';
@@ -67,7 +69,7 @@ describe('精确匹配', () => {
   });
 });
 
-describe('年份解析', () => {
+describe('年份与媒体形态解析', () => {
   it('air_year 优先，date 回落', () => {
     expect(bangumiSubjectYear(subject({ air_year: 2001, date: '1999-01-01' }))).toBe(
       2001,
@@ -81,23 +83,43 @@ describe('年份解析', () => {
     expect(neodbItemYear({ pub_year: 2003 } as NeodbItem)).toBe(2003);
     expect(neodbItemYear({} as NeodbItem)).toBeNull();
   });
+
+  it('NeoDB 分类 → 媒体形态', () => {
+    expect(neodbCategoryToMediaForm('movie')).toBe('movie');
+    expect(neodbCategoryToMediaForm('tv')).toBe('tv');
+    expect(neodbCategoryToMediaForm('book')).toBeNull();
+    expect(neodbCategoryToMediaForm(undefined)).toBeNull();
+  });
+
+  it('Bangumi 平台 → 媒体形态（保守识别）', () => {
+    expect(bangumiPlatformMediaForm('剧场版')).toBe('movie');
+    expect(bangumiPlatformMediaForm('电影')).toBe('movie');
+    expect(bangumiPlatformMediaForm('TV')).toBe('tv');
+    expect(bangumiPlatformMediaForm('Web')).toBe('tv');
+    expect(bangumiPlatformMediaForm('电视剧')).toBe('tv');
+    expect(bangumiPlatformMediaForm('OVA')).toBeNull();
+    expect(bangumiPlatformMediaForm(undefined)).toBeNull();
+  });
 });
 
-describe('年份三态软过滤', () => {
-  it('源年份未知 → 过滤不运行，取第一个候选', async () => {
-    const picked = await pickExactMatchByYear(
+describe('候选裁决（年份三态 + 歧义）', () => {
+  it('源年份未知：单候选命中，多候选歧义（不再取第一个）', async () => {
+    const single = await pickExactMatch([subject({ id: 10 })], null, 1);
+    expect(single).toEqual({
+      status: 'matched',
+      subject: expect.objectContaining({ id: 10 }),
+    });
+
+    const multiple = await pickExactMatch(
       [subject({ id: 10 }), subject({ id: 11 })],
       null,
       1,
     );
-    expect(picked).toEqual({
-      status: 'matched',
-      subject: expect.objectContaining({ id: 10 }),
-    });
+    expect(multiple.status).toBe('ambiguous');
   });
 
-  it('候选年份未知 → 该候选通过', async () => {
-    const picked = await pickExactMatchByYear([subject({ id: 20 })], 2001, 1);
+  it('候选年份未知：单候选通过', async () => {
+    const picked = await pickExactMatch([subject({ id: 20 })], 2001, 1);
     expect(picked).toEqual({
       status: 'matched',
       subject: expect.objectContaining({ id: 20 }),
@@ -105,13 +127,9 @@ describe('年份三态软过滤', () => {
   });
 
   it('双方都有：容差内通过，超容差拒绝', async () => {
-    const ok = await pickExactMatchByYear(
-      [subject({ id: 30, air_year: 2001 })],
-      2002,
-      1,
-    );
+    const ok = await pickExactMatch([subject({ id: 30, air_year: 2001 })], 2002, 1);
     expect(ok.status).toBe('matched');
-    const rejected = await pickExactMatchByYear(
+    const rejected = await pickExactMatch(
       [subject({ id: 31, air_year: 1990 })],
       2001,
       1,
@@ -120,7 +138,7 @@ describe('年份三态软过滤', () => {
   });
 
   it('第一个被拒后继续尝试下一个', async () => {
-    const picked = await pickExactMatchByYear(
+    const picked = await pickExactMatch(
       [subject({ id: 40, air_year: 1990 }), subject({ id: 41, air_year: 2001 })],
       2001,
       1,
@@ -132,7 +150,7 @@ describe('年份三态软过滤', () => {
   });
 
   it('书籍/音乐/游戏不参与年份过滤', async () => {
-    const picked = await pickExactMatchByYear(
+    const picked = await pickExactMatch(
       [subject({ id: 50, type: 1, date: '1999-01-01' })],
       2020,
       1,
@@ -144,6 +162,70 @@ describe('年份三态软过滤', () => {
   });
 
   it('空候选 → no-candidate', async () => {
-    expect((await pickExactMatchByYear([], 2001, 1)).status).toBe('no-candidate');
+    expect((await pickExactMatch([], 2001, 1)).status).toBe('no-candidate');
+  });
+});
+
+describe('媒体形态裁决', () => {
+  it('NeoDB tv 拒绝 Bangumi 剧场版，保留 TV', async () => {
+    const picked = await pickExactMatch(
+      [
+        subject({ id: 60, platform: '剧场版', air_year: 2001 }),
+        subject({ id: 61, platform: 'TV', air_year: 2001 }),
+      ],
+      2001,
+      1,
+      { mediaForm: 'tv' },
+    );
+    expect(picked).toEqual({
+      status: 'matched',
+      subject: expect.objectContaining({ id: 61 }),
+    });
+  });
+
+  it('平台不可判定（OVA/缺失）时不拒绝', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 62, platform: 'OVA', air_year: 2001 })],
+      2001,
+      1,
+      { mediaForm: 'tv' },
+    );
+    expect(picked.status).toBe('matched');
+  });
+
+  it('同年同形态多候选 → 歧义', async () => {
+    const picked = await pickExactMatch(
+      [
+        subject({ id: 70, platform: 'TV', air_year: 2001 }),
+        subject({ id: 71, platform: 'TV', air_year: 2001 }),
+      ],
+      2001,
+      1,
+      { mediaForm: 'tv' },
+    );
+    expect(picked.status).toBe('ambiguous');
+  });
+
+  it('年份更接近者胜出', async () => {
+    const picked = await pickExactMatch(
+      [
+        subject({ id: 80, platform: 'TV', air_year: 2001 }),
+        subject({ id: 81, platform: 'TV', air_year: 2000 }),
+      ],
+      2001,
+      2,
+      { mediaForm: 'tv' },
+    );
+    expect(picked).toEqual({
+      status: 'matched',
+      subject: expect.objectContaining({ id: 80 }),
+    });
+  });
+
+  it('自定义证据读取器优先于内置解析', async () => {
+    const picked = await pickExactMatch([subject({ id: 90, name_cn: 'x' })], 2001, 1, {
+      resolveEvidence: () => ({ year: 2001, mediaForm: 'tv' }),
+    });
+    expect(picked.status).toBe('matched');
   });
 });

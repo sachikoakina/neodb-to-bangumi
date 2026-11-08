@@ -1,13 +1,16 @@
 /**
- * 用 fixture 断言三级匹配策略：外链提取、标题候选顺序、精确匹配、年份三态过滤。
+ * 用 fixture 断言匹配策略：外链提取、标题候选顺序、精确匹配、年份三态、
+ * 媒体形态冲突与多候选歧义。
  */
 import { consola } from 'consola';
 import {
+  bangumiPlatformMediaForm,
   bangumiSubjectYear,
   exactMatches,
   extractBangumiSubjectId,
+  neodbCategoryToMediaForm,
   neodbItemYear,
-  pickExactMatchByYear,
+  pickExactMatch,
   titleCandidates,
 } from '../src/rules/neodb-bangumi-matching';
 import type { BangumiSubject, NeodbItem } from '../src/types';
@@ -61,7 +64,6 @@ const item = {
     { lang: 'ja', text: '千と千尋の神隠し' },
   ],
   year: 2001,
-  pub_year: undefined,
 } as unknown as NeodbItem;
 check('候选顺序 display_title → title → localized_title，去重', titleCandidates(item), [
   '千与千寻',
@@ -86,7 +88,7 @@ check(
   [10, 11],
 );
 
-// ── 年份解析 ──
+// ── 年份与媒体形态解析 ──
 check(
   'air_year 优先',
   bangumiSubjectYear(subject({ air_year: 2001, date: '1999-01-01' })),
@@ -94,74 +96,129 @@ check(
 );
 check('date 回落', bangumiSubjectYear(subject({ date: '2001-07-20' })), 2001);
 check('无年份', bangumiSubjectYear(subject({})), null);
-check('NeoDB year', neodbItemYear({ year: 2001, pub_year: 2003 } as NeodbItem), 2001);
+check('NeoDB year', neodbItemYear({ year: 2001 } as NeodbItem), 2001);
 check('NeoDB 书籍 pub_year', neodbItemYear({ pub_year: 2003 } as NeodbItem), 2003);
 
-// ── 年份三态过滤 ──
+check('NeoDB movie → movie', neodbCategoryToMediaForm('movie'), 'movie');
+check('NeoDB tv → tv', neodbCategoryToMediaForm('tv'), 'tv');
+check('NeoDB book → 不可判定', neodbCategoryToMediaForm('book'), null);
+check('平台剧场版 → movie', bangumiPlatformMediaForm('剧场版'), 'movie');
+check('平台 TV → tv', bangumiPlatformMediaForm('TV'), 'tv');
+check('平台 电视剧 → tv', bangumiPlatformMediaForm('电视剧'), 'tv');
+check('平台 OVA → 不可判定', bangumiPlatformMediaForm('OVA'), null);
+check('平台缺失 → 不可判定', bangumiPlatformMediaForm(undefined), null);
+
+// ── 年份三态 + 歧义 ──
 async function yearChecks(): Promise<void> {
-  // 源年份未知 → 过滤不运行，取第一个候选
-  const picked1 = await pickExactMatchByYear(candidates, null, 1);
+  // 源年份未知 + 单候选 → 直接命中
+  const single = [subject({ id: 10 })];
+  const picked1 = await pickExactMatch(single, null, 1);
   check(
-    '源年份未知取第一个',
+    '源年份未知单候选命中',
     picked1.status === 'matched' ? picked1.subject.id : null,
     10,
   );
 
-  // 候选年份未知 → 通过
-  const noYear = [subject({ id: 20, name: 'x', name_cn: '' })];
-  const picked2 = await pickExactMatchByYear(noYear, 2001, 1);
+  // 源年份未知 + 多候选 → 歧义（不再取第一个）
+  const picked2 = await pickExactMatch(
+    [subject({ id: 10 }), subject({ id: 11 })],
+    null,
+    1,
+  );
+  check('源年份未知多候选歧义', picked2.status, 'ambiguous');
+
+  // 候选年份未知 + 单候选 → 通过
+  const picked3 = await pickExactMatch([subject({ id: 20 })], 2001, 1);
   check(
-    '候选年份未知通过',
-    picked2.status === 'matched' ? picked2.subject.id : null,
+    '候选年份未知单候选命中',
+    picked3.status === 'matched' ? picked3.subject.id : null,
     20,
   );
 
   // 双方都有且在容差内
-  const year2001 = [subject({ id: 30, name: 'x', name_cn: '', air_year: 2001 })];
-  const picked3 = await pickExactMatchByYear(year2001, 2002, 1);
+  const picked4 = await pickExactMatch([subject({ id: 30, air_year: 2001 })], 2002, 1);
   check(
-    '年份差在容差内通过',
-    picked3.status === 'matched' ? picked3.subject.id : null,
+    '年份差在容差内命中',
+    picked4.status === 'matched' ? picked4.subject.id : null,
     30,
   );
 
   // 双方都有且超容差 → 拒绝
-  const year1990 = [subject({ id: 31, name: 'x', name_cn: '', air_year: 1990 })];
-  const picked4 = await pickExactMatchByYear(year1990, 2001, 1);
-  check('年份超容差拒绝', picked4.status, 'no-candidate');
+  const picked5 = await pickExactMatch([subject({ id: 31, air_year: 1990 })], 2001, 1);
+  check('年份超容差拒绝', picked5.status, 'no-candidate');
 
   // 第一个被拒后尝试下一个
-  const mixed = [
-    subject({ id: 40, name: 'x', name_cn: '', air_year: 1990 }),
-    subject({ id: 41, name: 'x', name_cn: '', air_year: 2001 }),
-  ];
-  const picked5 = await pickExactMatchByYear(mixed, 2001, 1);
+  const picked6 = await pickExactMatch(
+    [subject({ id: 40, air_year: 1990 }), subject({ id: 41, air_year: 2001 })],
+    2001,
+    1,
+  );
   check(
     '第一个被拒尝试下一个',
-    picked5.status === 'matched' ? picked5.subject.id : null,
+    picked6.status === 'matched' ? picked6.subject.id : null,
     41,
   );
 
-  // 书籍（type 1）不参与年份过滤
-  const book = [
-    subject({ id: 50, type: 1, name: 'x', name_cn: '', date: '1999-01-01' }),
-  ];
-  const picked6 = await pickExactMatchByYear(book, 2020, 1);
+  // 书籍（type 1）不参与年份过滤，多候选仍因证据不足歧义
+  const book = [subject({ id: 50, type: 1, date: '1999-01-01' })];
+  const picked7 = await pickExactMatch(book, 2020, 1);
   check(
     '书籍不参与年份过滤',
-    picked6.status === 'matched' ? picked6.subject.id : null,
+    picked7.status === 'matched' ? picked7.subject.id : null,
     50,
   );
 
   // 空候选
-  check('空候选', (await pickExactMatchByYear([], 2001, 1)).status, 'no-candidate');
+  check('空候选', (await pickExactMatch([], 2001, 1)).status, 'no-candidate');
+}
+
+// ── 媒体形态冲突 ──
+async function mediaChecks(): Promise<void> {
+  const movieCandidate = subject({
+    id: 60,
+    platform: '剧场版',
+    air_year: 2001,
+  });
+  const tvCandidate = subject({ id: 61, platform: 'TV', air_year: 2001 });
+
+  const picked = await pickExactMatch([movieCandidate, tvCandidate], 2001, 1, {
+    mediaForm: 'tv',
+  });
+  check(
+    'NeoDB tv 拒绝 Bangumi 剧场版，保留 TV',
+    picked.status === 'matched' ? picked.subject.id : null,
+    61,
+  );
+
+  const unknownPlatform = subject({ id: 62, platform: 'OVA', air_year: 2001 });
+  const picked2 = await pickExactMatch([unknownPlatform], 2001, 1, {
+    mediaForm: 'tv',
+  });
+  check(
+    '平台不可判定时不拒绝',
+    picked2.status === 'matched' ? picked2.subject.id : null,
+    62,
+  );
+
+  // 同年同形态多候选 → 歧义
+  const picked3 = await pickExactMatch(
+    [
+      subject({ id: 70, platform: 'TV', air_year: 2001 }),
+      subject({ id: 71, platform: 'TV', air_year: 2001 }),
+    ],
+    2001,
+    1,
+    { mediaForm: 'tv' },
+  );
+  check('同年同形态多候选歧义', picked3.status, 'ambiguous');
 }
 
 try {
   await yearChecks();
+  await mediaChecks();
 } catch (error) {
   failures += 1;
-  consola.error('FAIL 年份过滤执行异常: ', error);
+  consola.error('FAIL 匹配断言执行异常: ', error);
 }
 
 if (failures > 0) {

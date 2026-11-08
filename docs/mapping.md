@@ -1,6 +1,6 @@
 # 映射与匹配规则
 
-本文是实现的权威描述；`scripts/verify-mapping.ts` / `verify-matching.ts` 逐行断言其中的表格。
+本文是实现的权威描述；`scripts/verify-mapping.ts` / `verify-matching.ts` 逐行断言其中的表格，`tests/*.test.ts` 覆盖同一批边界。
 
 ## 状态映射
 
@@ -16,29 +16,31 @@
 1. **搁置保护**（始终开启）：NeoDB 没有「搁置」概念，无法表达该意图；目标为 `4` 时不覆盖，记 skipped。
 2. **`SYNC_STATUS_GUARD=no-downgrade`**：Bangumi 现有「看过」（2）不被想看/在看降级；评分短评仍按各自开关合并。
 3. **未知 shelf_type**：失败在关闭一侧，记 skipped 并告警。
+4. **目标认领**：同一 Bangumi `subject` 被多条 NeoDB 标记命中时，只让最强认领者写入。排序：外链（link）> 标题（title）；`complete` > `progress`/`wishlist` > `dropped`；仍相同取较小 NeoDB uuid。落败者记 `skipped` 并进入待核对名单（`duplicate-target`），不读收藏、不写目标。
 
 ## 字段映射
 
-| 字段   | 规则                                                                                                                                                    |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 评分   | NeoDB `rating_grade` 与 Bangumi `rate` 同为 0–10，**直接透传**。默认 `bangumi_prefer`：目标非 0 分保留、为 0 才填充、源无分不清空；`overwrite` 才覆盖。 |
-| 短评   | 默认 `bangumi_prefer` 只填空；`overwrite` 覆盖含清空。                                                                                                  |
-| 可见性 | 默认不映射。`SYNC_MAP_PRIVATE=1` 时 NeoDB `visibility=2`（私密）→ `private: true`。                                                                     |
-| 时间   | **无法迁移**：Bangumi API 不接受自定义收藏时间，服务端写 `updated_at`。`unchanged` 时不发请求，目标时间不变。                                           |
-| 进度   | 见下节，`SYNC_PROGRESS=1` 才写。                                                                                                                        |
+| 字段 | 规则                                                                                                                                                                                                 |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 评分 | NeoDB `rating_grade` 与 Bangumi `rate` 同为 0–10，**直接透传**。默认 `bangumi_prefer`：目标非 0 分保留、为 0 才填充、源无分不清空；`overwrite` 才覆盖。                                              |
+| 短评 | 默认 `bangumi_prefer` 只填空；`overwrite` 覆盖含清空。                                                                                                                                               |
+| 隐私 | `SYNC_BANGUMI_PRIVATE_MODE=target`（默认）统一写 `SYNC_BANGUMI_PRIVATE`；`source` 逐条跟随 NeoDB：`visibility=2` → `private=true`，`0/1` → `false`，源缺失保留目标现值/配置兜底。隐私始终参与 diff。 |
+| 时间 | **无法迁移**：Bangumi API 不接受自定义收藏时间，服务端写 `updated_at`。`unchanged` 时不发请求，目标时间不变。                                                                                        |
+| 进度 | 见下节，`SYNC_PROGRESS=1` 才写。                                                                                                                                                                     |
 
 ## 进度拉满（`SYNC_PROGRESS=1`，仅 complete 条目）
 
-| Bangumi 条目类型 | 上限来源                          | 拉满方式                                                                                                                   |
-| ---------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| 书籍 1           | `subject.eps` / `subject.volumes` | 随收藏 upsert 同一请求写 `ep_status`/`vol_status` 至上限；**总量缺失的维度跳过**（迁移语义，不瞎填）；已达上限的维度不重写 |
-| 电影             | 正片列表                          | 只补第一个正片集；无正片仅收藏                                                                                             |
-| 动画 2 / 真人 6  | 正片列表（`includeSp` 才含 SP）   | 逐集 `PUT /v0/users/-/collections/-/episodes/{id}` 标记看过；已 `type=2` 的集零请求                                        |
-| 音乐 3 / 游戏 4  | —                                 | 平台无对应进度字段，不写                                                                                                   |
+| Bangumi 条目类型 | 上限来源                                                        | 拉满方式                                                                                                                   |
+| ---------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 书籍 1           | `subject.eps` / `subject.volumes`                               | 随收藏 upsert 同一请求写 `ep_status`/`vol_status` 至上限；**总量缺失的维度跳过**（迁移语义，不瞎填）；已达上限的维度不重写 |
+| 电影             | 正片列表                                                        | 只补第一个正片集；无正片仅收藏；SP 与 OP/ED 永不处理                                                                       |
+| 动画 2 / 真人 6  | 正片列表（`SYNC_INCLUDE_SP`/`SYNC_INCLUDE_OP_ED` 才含对应类型） | 逐集 `PUT /v0/users/-/collections/-/episodes/{id}` 标记看过；已 `type=2` 的集零请求                                        |
+| 音乐 3 / 游戏 4  | —                                                               | 平台无对应进度字段，不写                                                                                                   |
 
-幂等保证：分集层面以**分集实际 `type=2`** 为准，不以上条目「看过」为准；第二轮运行 missing 为空 → 零请求。
+- OP/ED（`type=2/3`）默认不纳入：看完本篇不代表看过主题曲；开启后仍只作用于非电影。
+- 幂等保证：分集层面以**分集实际 `type=2`** 为准，不以上条目「看过」为准；第二轮运行 missing 为空 → 零请求。
 
-## 匹配策略（三级，失败即 unresolved）
+## 匹配策略（三级）
 
 ```text
 1. 外链直连：external_resources 里的 (bgm|bangumi).tv/subject/{id} —— 最可靠
@@ -46,16 +48,31 @@
    按分类限定 subject_type（book→1；movie,tv→2,6；music→3；game→4；
    podcast/performance 无对应，直接跳过），
    候选 name/name_cn 经 trim().toLowerCase() 后必须与搜索标题完全相等
-3. 年份软过滤：仅动画 2 / 真人 6 参与，三态规则——
-   源年份未知 → 过滤不运行；候选年份未知 → 通过；
-   双方都有 → |候选 − 源| ≤ SYNC_YEAR_TOLERANCE 才保留
+3. 证据裁决：
+   a. 年份过滤（仅动画 2 / 真人 6）：源年份未知不比较；候选未知通过；
+      双方都有 → |候选 − 源| ≤ SYNC_YEAR_TOLERANCE
+   b. 媒体形态过滤：NeoDB movie/tv 对比 Bangumi platform
+      （剧场版/电影→movie；TV/Web/电视剧/动态漫画→tv；
+       OVA 等不可判定 → 不拒绝）
+   c. 年份接近度打分：唯一最高分 → 命中；并列或全部不可知 → ambiguous
 ```
 
-- 不猜、不模糊匹配、不跨分类回退；
-- 条目缺年份时按 `api_url` 拉取 NeoDB 条目详情补齐并缓存；
-- 全部失败 → `unresolved` 并写入待核对名单（upsert 去重），在 NeoDB 条目上补 Bangumi 外链后下轮即可命中。
+- 不猜、不模糊匹配、不跨分类回退；多候选不再取第一个。
+- 歧义（`ambiguous-bangumi-match`）不写入，记 unresolved；本方向没有「直连回退」可用。
+- 搜索失败、年份读取失败归 `failed`（可重跑），**不**伪装成「没有结果」；读取收藏失败同样按 failed 处理，绝不当成「未收藏」覆盖。
+- 条目缺年份时按 `api_url` 拉取 NeoDB 条目详情补齐并缓存；失败不缓存，下轮重试。
+- 未匹配与歧义写入待核对名单（upsert 去重，带 category/shelf/uuid）；在 NeoDB 条目上补 Bangumi 外链后下轮即可命中。
+- 每条目处理结束后统一节流，避免全量运行把请求打出突发。
+
+## 全量游标
+
+- 仅 `FULL_SYNC=1` 且非 dry-run 读写 `FULL_SYNC_CURSOR_FILE`；按书架记录下一页。
+- 每页处理完写一次；空页、已到上报页数时删除该书架键。
+- 认证中止等主动停止保留当前页（`nextPage = page`），续跑时整页重走——写入幂等，不会漏条目。
+- 常规运行永远从第 1 页开始，靠增量指纹跳过已同步条目。
 
 ## 与原项目（Audiovisual-Transporter）的差异
 
 - 书籍进度在迁移语境下以「源 complete」为拉满意图（`planBookProgress` 的 `sourceComplete` 分支）；原豆瓣链路的保守行为（0 视为未知不触碰）保留为缺省分支，两种语境一个纯函数。
-- 其余规则（状态映射方向、年份三态过滤、分集幂等、401 中止、unresolved 语义）与原项目一致。
+- 不引入标记时间策略：Bangumi 没有可写的收藏时间字段。
+- 其余规则（状态映射方向、年份三态过滤、分集幂等、401 中止、unresolved 语义、目标认领裁决）与原项目一致。

@@ -48,6 +48,10 @@ export type UnmatchedEntry = {
   reason: string;
   title: string;
   itemUrl: string;
+  /** 分类与书架元数据：人工核对时无需回查 NeoDB。 */
+  category?: string;
+  shelf?: string;
+  neodbUuid?: string;
   firstSeenAt: string;
   lastSeenAt: string;
 };
@@ -61,7 +65,14 @@ export type UnmatchedMap = Map<string, UnmatchedEntry>;
 export function upsertUnmatched(
   entries: UnmatchedMap,
   key: string,
-  detail: { reason: string; title: string; itemUrl: string },
+  detail: {
+    reason: string;
+    title: string;
+    itemUrl: string;
+    category?: string;
+    shelf?: string;
+    neodbUuid?: string;
+  },
 ): void {
   const now = new Date().toISOString();
   const existing = entries.get(key);
@@ -75,6 +86,9 @@ export function upsertUnmatched(
     reason: detail.reason,
     title: detail.title,
     itemUrl: detail.itemUrl,
+    ...(detail.category ? { category: detail.category } : {}),
+    ...(detail.shelf ? { shelf: detail.shelf } : {}),
+    ...(detail.neodbUuid ? { neodbUuid: detail.neodbUuid } : {}),
     firstSeenAt: now,
     lastSeenAt: now,
   });
@@ -111,6 +125,8 @@ export type SummaryContext = {
   shelves: ShelfType[];
   truncatedShelves: ShelfType[];
   unmatchedCount: number;
+  /** 待核对原因分布：直接告诉读者该补外链还是该重跑。 */
+  unmatchedByReason?: Record<string, number>;
 };
 
 export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): string {
@@ -135,5 +151,16 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
   );
   lines.push('');
   lines.push(`待核对名单条目数：${ctx.unmatchedCount}`);
+  const reasons = Object.entries(ctx.unmatchedByReason ?? {}).sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  );
+  if (reasons.length) {
+    lines.push('');
+    lines.push('| 待核对原因 | 条目数 |');
+    lines.push('| --- | ---: |');
+    for (const [reason, count] of reasons) {
+      lines.push(`| ${reason} | ${count} |`);
+    }
+  }
   return lines.join('\n');
 }

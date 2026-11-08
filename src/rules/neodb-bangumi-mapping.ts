@@ -138,9 +138,44 @@ export function mergeComment(
 }
 
 /**
- * 可见性映射（可选开启）：NeoDB `visibility=2`（私密）→ `private: true`，
- * 其余 → `false`。默认关闭，关闭时不写 `private` 字段、不参与 diff。
+ * 可见性模式。
+ *
+ * - `target`：统一写配置的 `SYNC_BANGUMI_PRIVATE`；
+ * - `source`：逐条跟随 NeoDB 的 `visibility`，保住用户逐条设置的差异。
  */
-export function mapVisibilityToPrivate(visibility: number | null | undefined): boolean {
-  return visibility === 2;
+export type BangumiPrivateMode = 'target' | 'source';
+
+export type BangumiPrivatePlan = {
+  private: boolean;
+  reason: 'target' | 'source-private' | 'source-public' | 'source-missing';
+};
+
+/**
+ * NeoDB 可见性 → Bangumi `private`。
+ *
+ * NeoDB 是 0/1/2 三态，Bangumi 只有布尔，因此：
+ * - `visibility=2`（私密）→ `true`；
+ * - `0`（公开）或 `1`（仅关注者）→ `false`（Bangumi 没有中间态）；
+ * - 源缺失（undefined）→ 保留目标现值，目标也没有才用配置兜底 —— 源端
+ *   无法回答时不猜测，否则一次缺字段就会把用户的私密收藏改成公开。
+ */
+export function planBangumiPrivate(input: {
+  mode: BangumiPrivateMode;
+  targetPrivate: boolean;
+  sourceVisibility?: number | null;
+  existingPrivate?: boolean | null;
+}): BangumiPrivatePlan {
+  if (input.mode === 'target') {
+    return { private: input.targetPrivate, reason: 'target' };
+  }
+  if (input.sourceVisibility === 2) {
+    return { private: true, reason: 'source-private' };
+  }
+  if (input.sourceVisibility === 0 || input.sourceVisibility === 1) {
+    return { private: false, reason: 'source-public' };
+  }
+  return {
+    private: input.existingPrivate ?? input.targetPrivate,
+    reason: 'source-missing',
+  };
 }

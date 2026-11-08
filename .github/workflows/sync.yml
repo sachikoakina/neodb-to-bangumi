@@ -60,19 +60,23 @@ jobs:
       SYNC_DRY_RUN: ${{ inputs.dry_run && '1' || vars.SYNC_DRY_RUN || '0' }}
       SYNC_PROGRESS: ${{ inputs.progress && '1' || vars.SYNC_PROGRESS || '0' }}
       SYNC_INCLUDE_SP: ${{ vars.SYNC_INCLUDE_SP || '0' }}
+      SYNC_INCLUDE_OP_ED: ${{ vars.SYNC_INCLUDE_OP_ED || '0' }}
       SYNC_SHELF_TYPES: ${{ vars.SYNC_SHELF_TYPES || 'wishlist,progress,complete,dropped' }}
       SYNC_CATEGORIES: ${{ vars.SYNC_CATEGORIES || 'book,movie,tv,music,game' }}
       SYNC_YEAR_TOLERANCE: ${{ vars.SYNC_YEAR_TOLERANCE || '1' }}
       SYNC_NEODB_BANGUMI_RATING: ${{ vars.SYNC_NEODB_BANGUMI_RATING || 'bangumi_prefer' }}
       SYNC_NEODB_BANGUMI_COMMENT: ${{ vars.SYNC_NEODB_BANGUMI_COMMENT || 'bangumi_prefer' }}
       SYNC_STATUS_GUARD: ${{ vars.SYNC_STATUS_GUARD || 'off' }}
-      SYNC_MAP_PRIVATE: ${{ vars.SYNC_MAP_PRIVATE || '0' }}
+      SYNC_BANGUMI_PRIVATE_MODE: ${{ vars.SYNC_BANGUMI_PRIVATE_MODE || 'target' }}
+      SYNC_BANGUMI_PRIVATE: ${{ vars.SYNC_BANGUMI_PRIVATE || 'false' }}
       SYNC_MAX_ITEMS: ${{ vars.SYNC_MAX_ITEMS || '50' }}
 
       # runner 是临时的，增量状态靠下方的 cache restore/save 跨运行保留；
       # 全量运行会忽略它，从头走一遍。
       SYNC_INCREMENTAL: ${{ vars.SYNC_INCREMENTAL || '1' }}
       SYNC_STATE_FILE: ${{ vars.SYNC_STATE_FILE || '.cache/sync-state.json' }}
+      # 仅 FULL_SYNC=1 使用；常规运行不读不写。
+      FULL_SYNC_CURSOR_FILE: ${{ vars.FULL_SYNC_CURSOR_FILE || '.cache/full-sync-cursor.json' }}
       # 未匹配清单随本轮 artifact 上传，供人工核对后在 NeoDB 补 Bangumi 外链。
       SYNC_UNMATCHED_LOG: ${{ vars.SYNC_UNMATCHED_LOG || '.cache/unmatched.json' }}
       SYNC_REPORT_FILE: ${{ vars.SYNC_REPORT_FILE || '.cache/sync-report.json' }}
@@ -102,6 +106,17 @@ jobs:
           restore-keys: |
             sync-state-
 
+      # 全量游标：被超时杀掉的全量运行必须能从停下的一页继续。
+      # 只有全量参与；常规运行必须从头开始，否则会藏掉最新标记。
+      - name: Restore the full-sync cursor
+        if: inputs.full_sync
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/full-sync-cursor.json
+          key: full-sync-cursor-${{ github.run_id }}
+          restore-keys: |
+            full-sync-cursor-
+
       - name: Record UTC run start
         id: run_start
         run: echo "value=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_OUTPUT"
@@ -126,6 +141,14 @@ jobs:
           path: .cache/sync-state.json
           key: sync-state-${{ github.run_id }}
 
+      # 全量游标同样无论成败都保存：中途被杀才有意义。
+      - name: Save the full-sync cursor
+        if: always() && inputs.full_sync
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/full-sync-cursor.json
+          key: full-sync-cursor-${{ github.run_id }}
+
       - name: Upload the run report
         if: always()
         uses: actions/upload-artifact@v4
@@ -135,5 +158,6 @@ jobs:
             .cache/sync-report.json
             .cache/sync-summary.md
             .cache/unmatched.json
+            .cache/full-sync-cursor.json
           if-no-files-found: warn
           retention-days: 7

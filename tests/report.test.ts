@@ -60,6 +60,24 @@ describe('待核对名单 upsert', () => {
     expect(second.lastSeenAt >= first.lastSeenAt).toBe(true);
     expect(map.size).toBe(1);
   });
+
+  it('记录分类/书架/uuid 元数据，便于人工核对', () => {
+    const map = new Map();
+    upsertUnmatched(map, 'uuid-2', {
+      reason: 'ambiguous-bangumi-match',
+      title: '同名作品',
+      itemUrl: 'https://neodb.social/tv/xyz',
+      category: 'tv',
+      shelf: 'complete',
+      neodbUuid: 'uuid-2',
+    });
+    expect(map.get('uuid-2')).toMatchObject({
+      category: 'tv',
+      shelf: 'complete',
+      neodbUuid: 'uuid-2',
+      reason: 'ambiguous-bangumi-match',
+    });
+  });
 });
 
 describe('摘要渲染', () => {
@@ -79,5 +97,24 @@ describe('摘要渲染', () => {
     expect(md).toContain('全量');
     expect(md).toContain('未遍历完整');
     expect(md).toContain('待核对名单条目数：3');
+  });
+
+  it('按原因渲染待核对分布', () => {
+    const md = renderSummaryMarkdown(createReport(), {
+      startedAt: '2026-11-05T00:00:00Z',
+      finishedAt: '2026-11-05T00:01:00Z',
+      dryRun: false,
+      fullSync: false,
+      shelves: ['complete'],
+      truncatedShelves: [],
+      unmatchedCount: 5,
+      unmatchedByReason: {
+        'no-bangumi-match': 3,
+        'ambiguous-bangumi-match': 2,
+      },
+    });
+    expect(md).toContain('| 待核对原因 | 条目数 |');
+    expect(md).toContain('| no-bangumi-match | 3 |');
+    expect(md).toContain('| ambiguous-bangumi-match | 2 |');
   });
 });

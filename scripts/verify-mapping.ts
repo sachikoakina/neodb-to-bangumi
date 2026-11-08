@@ -5,12 +5,12 @@ import { consola } from 'consola';
 import {
   isBangumiSupportedCategory,
   mapShelfType,
-  mapVisibilityToPrivate,
   mergeComment,
   mergeRating,
   neodbCategoryToBangumiSubjectTypes,
+  planBangumiPrivate,
 } from '../src/rules/neodb-bangumi-mapping';
-import { planBookProgress } from '../src/rules/bangumi-progress';
+import { planBookProgress, planEpisodeProgress } from '../src/rules/bangumi-progress';
 
 let failures = 0;
 
@@ -77,10 +77,84 @@ check('prefer: 目标空用源填充', mergeComment('新的', '', 'bangumi_prefe
 check('prefer: 源空不清空', mergeComment('', '旧的', 'bangumi_prefer'), '旧的');
 check('overwrite: 源覆盖含清空', mergeComment('', '旧的', 'overwrite'), '');
 
-// ── 可见性 ──
-check('visibility 2→private', mapVisibilityToPrivate(2), true);
-check('visibility 0→public', mapVisibilityToPrivate(0), false);
-check('visibility 缺失→public', mapVisibilityToPrivate(undefined), false);
+// ── 隐私：target / source 双模式 ──
+check(
+  'target 模式统一写配置值',
+  planBangumiPrivate({ mode: 'target', targetPrivate: true, sourceVisibility: 0 }),
+  { private: true, reason: 'target' },
+);
+check(
+  'source 模式：私密(2)→true',
+  planBangumiPrivate({ mode: 'source', targetPrivate: false, sourceVisibility: 2 }),
+  { private: true, reason: 'source-private' },
+);
+check(
+  'source 模式：公开(0)→false',
+  planBangumiPrivate({
+    mode: 'source',
+    targetPrivate: true,
+    sourceVisibility: 0,
+    existingPrivate: true,
+  }),
+  { private: false, reason: 'source-public' },
+);
+check(
+  'source 模式：仅关注者(1)→false',
+  planBangumiPrivate({ mode: 'source', targetPrivate: false, sourceVisibility: 1 }),
+  { private: false, reason: 'source-public' },
+);
+check(
+  'source 缺失：保留目标现值',
+  planBangumiPrivate({
+    mode: 'source',
+    targetPrivate: false,
+    sourceVisibility: undefined,
+    existingPrivate: true,
+  }),
+  { private: true, reason: 'source-missing' },
+);
+check(
+  'source 缺失且无目标：用配置兜底',
+  planBangumiPrivate({ mode: 'source', targetPrivate: true, sourceVisibility: null }),
+  { private: true, reason: 'source-missing' },
+);
+
+// ── 分集进度：OP/ED 可选纳入 ──
+const episodesForThemes = [
+  { id: 1, type: 0, sort: 1 },
+  { id: 2, type: 1, sort: 2 },
+  { id: 3, type: 2, sort: 3 },
+  { id: 4, type: 3, sort: 4 },
+];
+check(
+  'OP/ED 默认不纳入',
+  planEpisodeProgress(episodesForThemes, new Map(), {
+    isMovie: false,
+    includeSp: false,
+    collected: true,
+  }).target,
+  [1],
+);
+check(
+  'OP/ED 开启后纳入 type 2/3',
+  planEpisodeProgress(episodesForThemes, new Map(), {
+    isMovie: false,
+    includeSp: false,
+    includeOpEd: true,
+    collected: true,
+  }).target,
+  [1, 3, 4],
+);
+check(
+  '电影永不纳入 OP/ED',
+  planEpisodeProgress(episodesForThemes, new Map(), {
+    isMovie: true,
+    includeSp: true,
+    includeOpEd: true,
+    collected: true,
+  }).target,
+  [1],
+);
 
 // ── 书籍进度：迁移语义（sourceComplete=true）──
 check(

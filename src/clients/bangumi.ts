@@ -291,12 +291,25 @@ export async function markBangumiEpisodeWatched(
   }
 }
 
-/** 按关键词与类型搜索条目。失败返回空数组 —— 只影响这一条匹配，不算致命。 */
+/**
+ * 按关键词与类型搜索条目。
+ *
+ * 返回 `ReadResult` 而不是空数组：请求失败与「真的没有结果」不是同一件事，
+ * 把前者伪装成空结果会让条目被误记为 unresolved（数据缺口），而不是 failed
+ * （可重跑）。401/403 归为 auth，由调用方中止链路。
+ */
 export async function searchBangumiSubjects(
   keyword: string,
   types?: BangumiSubjectType[],
   limit = 10,
-): Promise<BangumiSubject[]> {
+): Promise<ReadResult<BangumiSubject[]>> {
+  if (!bangumiToken) {
+    return {
+      status: 'error',
+      scope: 'auth',
+      message: 'BANGUMI_ACCESS_TOKEN is not set',
+    };
+  }
   try {
     const body: {
       keyword: string;
@@ -312,13 +325,22 @@ export async function searchBangumiSubjects(
         json: body,
       })
       .json()) as { data?: BangumiSubject[] };
-    return result.data || [];
+    return { status: 'found', value: result.data || [] };
   } catch (error) {
-    if (isUnauthorized(error)) {
+    const status = error instanceof HTTPError ? error.response.statusCode : null;
+    if (classifyReadFailure(status) === 'auth') {
       logUnauthorized();
-    } else {
-      consola.error('搜索 Bangumi 条目失败: ', error);
+      return {
+        status: 'error',
+        scope: 'auth',
+        message: `search "${keyword}" returned ${status ?? 'no response'}`,
+      };
     }
-    return [];
+    consola.error(`搜索 Bangumi 条目失败（${keyword}）: `, error);
+    return {
+      status: 'error',
+      scope: 'item',
+      message: `search "${keyword}" returned ${status ?? 'no response'}`,
+    };
   }
 }

@@ -11,6 +11,7 @@ import dotenv from 'dotenv';
 import { consola } from 'consola';
 import { SHELF_TYPES, type NeodbShelfMark, type ShelfType } from './types';
 import type {
+  BangumiPrivateMode,
   CommentMergeProfile,
   RatingMergeProfile,
   StatusGuard,
@@ -35,12 +36,15 @@ export const ENV_KEYS: readonly string[] = [
   'SYNC_NEODB_BANGUMI_RATING',
   'SYNC_NEODB_BANGUMI_COMMENT',
   'SYNC_STATUS_GUARD',
-  'SYNC_MAP_PRIVATE',
+  'SYNC_BANGUMI_PRIVATE_MODE',
+  'SYNC_BANGUMI_PRIVATE',
   'SYNC_PROGRESS',
   'SYNC_INCLUDE_SP',
+  'SYNC_INCLUDE_OP_ED',
   'SYNC_INCREMENTAL',
   'SYNC_STATE_FILE',
   'FULL_SYNC',
+  'FULL_SYNC_CURSOR_FILE',
   'SYNC_UNMATCHED_LOG',
   'SYNC_REPORT_FILE',
   'SYNC_SUMMARY_FILE',
@@ -178,12 +182,15 @@ export type SyncConfig = {
     ratingProfile: RatingMergeProfile;
     commentProfile: CommentMergeProfile;
     statusGuard: StatusGuard;
-    mapPrivate: boolean;
+    bangumiPrivateMode: BangumiPrivateMode;
+    bangumiPrivate: boolean;
     progress: boolean;
     includeSp: boolean;
+    includeOpEd: boolean;
     incremental: boolean;
     stateFile: string;
     fullSync: boolean;
+    fullSyncCursorFile: string;
     unmatchedLog: string;
     reportFile: string;
     summaryFile: string;
@@ -236,12 +243,23 @@ export function loadSyncConfig(): SyncConfig {
         ['off', 'no-downgrade'] as const,
         'off',
       ),
-      mapPrivate: envEnabled('SYNC_MAP_PRIVATE', false),
+      bangumiPrivateMode: parseEnum(
+        'SYNC_BANGUMI_PRIVATE_MODE',
+        process.env.SYNC_BANGUMI_PRIVATE_MODE,
+        ['target', 'source'] as const,
+        'target',
+      ),
+      bangumiPrivate: envEnabled('SYNC_BANGUMI_PRIVATE', false),
       progress: envEnabled('SYNC_PROGRESS', false),
       includeSp: envEnabled('SYNC_INCLUDE_SP', false),
+      includeOpEd: envEnabled('SYNC_INCLUDE_OP_ED', false),
       incremental: envEnabled('SYNC_INCREMENTAL', true),
       stateFile: envString('SYNC_STATE_FILE', '.cache/sync-state.json'),
       fullSync: envEnabled('FULL_SYNC', false),
+      fullSyncCursorFile: envString(
+        'FULL_SYNC_CURSOR_FILE',
+        '.cache/full-sync-cursor.json',
+      ),
       unmatchedLog: envString('SYNC_UNMATCHED_LOG', '.cache/unmatched.json'),
       reportFile: envString('SYNC_REPORT_FILE', '.cache/sync-report.json'),
       summaryFile: envString('SYNC_SUMMARY_FILE', '.cache/sync-summary.md'),
@@ -266,8 +284,10 @@ export function describeSyncConfig(config: SyncConfig): string {
     `  分类白名单: ${categories}`,
     `  dry-run: ${s.dryRun ? 1 : 0}｜全量: ${s.fullSync ? 1 : 0}｜条目上限: ${s.maxItems}`,
     `  评分: ${s.ratingProfile}｜短评: ${s.commentProfile}｜状态保护: ${s.statusGuard}`,
-    `  可见性映射: ${s.mapPrivate ? 1 : 0}｜进度拉满: ${s.progress ? 1 : 0}（SP: ${s.includeSp ? 1 : 0}）`,
+    `  隐私: ${s.bangumiPrivateMode}${s.bangumiPrivateMode === 'target' ? `（private=${s.bangumiPrivate}）` : ''}` +
+      `｜进度拉满: ${s.progress ? 1 : 0}（SP: ${s.includeSp ? 1 : 0}，OP/ED: ${s.includeOpEd ? 1 : 0}）`,
     `  增量: ${s.incremental && !s.fullSync ? 1 : 0}｜状态文件: ${s.stateFile}`,
+    `  全量游标: ${s.fullSync ? s.fullSyncCursorFile : '未启用（仅 FULL_SYNC=1 使用）'}`,
     `  年份容差: ${s.yearTolerance}`,
   ].join('\n');
 }
@@ -309,6 +329,42 @@ export function saveSyncState(path: string, state: SyncState): void {
   writeFileSync(
     path,
     JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), marks: state }),
+    'utf8',
+  );
+}
+
+// ─── 全量游标 ───────────────────────────────────────────────────────────
+//
+// 只有 `FULL_SYNC=1` 使用。常规运行必须从第 1 页开始：它的窗口就是最新
+// 一页，沿用旧游标会静默藏掉这一轮本来要抓的新标记。
+
+/** 书架 → 下一页页码。 */
+export type FullSyncCursor = Record<string, number>;
+
+export function loadFullSyncCursor(path: string): FullSyncCursor {
+  if (!existsSync(path)) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
+      pages?: FullSyncCursor;
+    };
+    return parsed.pages ?? {};
+  } catch {
+    consola.warn(`全量游标文件损坏，按从头开始处理: ${path}`);
+    return {};
+  }
+}
+
+export function saveFullSyncCursor(path: string, cursor: FullSyncCursor): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify(
+      { version: 1, updatedAt: new Date().toISOString(), pages: cursor },
+      null,
+      2,
+    ),
     'utf8',
   );
 }

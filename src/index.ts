@@ -41,6 +41,11 @@ async function main(): Promise<void> {
     consola.warn(`以下书架未遍历完整: ${truncatedShelves.join(', ')}`);
   }
 
+  const unmatchedByReason: Record<string, number> = {};
+  for (const entry of result.unmatched.values()) {
+    unmatchedByReason[entry.reason] = (unmatchedByReason[entry.reason] ?? 0) + 1;
+  }
+
   const summary = renderSummaryMarkdown(report, {
     startedAt,
     finishedAt,
@@ -49,6 +54,7 @@ async function main(): Promise<void> {
     shelves: config.sync.shelfTypes,
     truncatedShelves,
     unmatchedCount: result.unmatched.size,
+    unmatchedByReason,
   });
 
   mkdirSync(dirname(config.sync.reportFile), { recursive: true });

@@ -99,39 +99,71 @@ export type ShelfPageVisitor = (
   marks: NeodbPagedMark['data'],
 ) => boolean | Promise<boolean>;
 
+export type ShelfWalkOptions = {
+  /** 起始页；仅全量续跑传入 >1 的值，常规运行永远从第 1 页开始。 */
+  startPage?: number;
+  fetchPage?: typeof fetchShelfPage;
+  /**
+   * 每处理完一页回调一次，供全量游标落盘。
+   * `done` 表示这一趟已走完（空页、已到上报页数或调用方主动停止）。
+   */
+  onPage?: (info: {
+    page: number;
+    nextPage: number;
+    done: boolean;
+  }) => void | Promise<void>;
+};
+
 /**
- * 遍历某个书架的全部分页，把每一页交给 `visit`。
+ * 遍历某个书架的分页，把每一页交给 `visit`。
  *
  * - `visit` 返回 `false` 表示调用方主动停止（条目配额已满），这**不是**截断；
- * - 失败或畸形页返回 `{ truncated: true }`，让上层在摘要里如实标注覆盖不完整。
+ * - 失败或畸形页返回 `{ truncated: true }`，让上层在摘要里如实标注覆盖不完整；
+ * - 页码预算按「从起始页起还能走多少页」计算，续跑不会因起始页变大而少走。
  */
 export async function walkShelfPages(
   shelfType: ShelfType,
   maxPages: number,
   visit: ShelfPageVisitor,
-  fetchPage: typeof fetchShelfPage = fetchShelfPage,
+  options: ShelfWalkOptions = {},
 ): Promise<{ truncated: boolean }> {
-  for (let page = 1; page <= maxPages; page += 1) {
+  const startPage = Math.max(1, Math.floor(options.startPage ?? 1));
+  const fetchPage = options.fetchPage ?? fetchShelfPage;
+  const lastPage = startPage + Math.max(1, Math.floor(maxPages)) - 1;
+
+  for (let page = startPage; page <= lastPage; page += 1) {
     const result = await fetchPage({ shelfType, page });
     if (result === null) {
       consola.warn(`书架 ${shelfType} 在第 ${page} 页因错误中止。`);
       return { truncated: true };
     }
     if (result.data.length === 0) {
+      await options.onPage?.({ page, nextPage: page + 1, done: true });
       return { truncated: false };
     }
 
     // 先跑 visitor 再判断页数预算：因为配额已满而停的决定优先于「走到了第 N 页」。
     const keepGoing = await visit(result.data);
     if (!keepGoing) {
+      // 主动停止可能是认证中止：游标指回当前页，续跑时整页重走（写入幂等），
+      // 不能前进到下一页而漏掉本页剩余条目。
+      await options.onPage?.({ page, nextPage: page, done: false });
       return { truncated: false };
     }
 
     const reportedPages = Number(result.pages);
-    if (Number.isFinite(reportedPages) && page >= reportedPages) {
+    const reachedEnd = Number.isFinite(reportedPages) && page >= reportedPages;
+    const budgetEnd = page === lastPage;
+    await options.onPage?.({
+      page,
+      nextPage: page + 1,
+      done: reachedEnd || budgetEnd,
+    });
+
+    if (reachedEnd) {
       return { truncated: false };
     }
-    if (page === maxPages) {
+    if (budgetEnd) {
       consola.warn(`书架 ${shelfType} 达到页数上限 ${maxPages}，还有条目未遍历。`);
       return { truncated: true };
     }
