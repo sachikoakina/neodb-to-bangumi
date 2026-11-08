@@ -213,9 +213,72 @@ async function mediaChecks(): Promise<void> {
   check('同年同形态多候选歧义', picked3.status, 'ambiguous');
 }
 
+// ── 证据严格模式（SYNC_MATCH_STRICT=1）──
+async function strictChecks(): Promise<void> {
+  // 唯一候选年份未知 + 平台不可判定 → 持留，不写入
+  const held = await pickExactMatch([subject({ id: 100 })], 2002, 1, {
+    strict: true,
+  });
+  check(
+    'strict：唯一候选证据不足 → 持留',
+    held.status === 'ambiguous' && held.hold === 'insufficient-evidence',
+    true,
+  );
+
+  // 同一候选关闭 strict → 命中（旧行为保留）
+  const loose = await pickExactMatch([subject({ id: 101 })], 2002, 1);
+  check(
+    '非 strict：证据缺失照写（旧行为）',
+    loose.status === 'matched' ? loose.subject.id : null,
+    101,
+  );
+
+  // 年份经双方核对（容差内）→ 命中
+  const verified = await pickExactMatch(
+    [subject({ id: 102, air_year: 2001 })],
+    2001,
+    1,
+    {
+      strict: true,
+    },
+  );
+  check(
+    'strict：年份核对通过 → 命中',
+    verified.status === 'matched' ? verified.subject.id : null,
+    102,
+  );
+
+  // 形态互证（源 movie ↔ 候选 剧场版）→ 命中
+  const formOk = await pickExactMatch(
+    [subject({ id: 103, platform: '剧场版' })],
+    null,
+    1,
+    {
+      strict: true,
+      mediaForm: 'movie',
+    },
+  );
+  check(
+    'strict：形态互证 → 命中',
+    formOk.status === 'matched' ? formOk.subject.id : null,
+    103,
+  );
+
+  // 书籍候选（type 1）不参与严格模式
+  const book = await pickExactMatch([subject({ id: 104, type: 1 })], 2002, 1, {
+    strict: true,
+  });
+  check(
+    'strict：书籍候选不参与（保持命中）',
+    book.status === 'matched' ? book.subject.id : null,
+    104,
+  );
+}
+
 try {
   await yearChecks();
   await mediaChecks();
+  await strictChecks();
 } catch (error) {
   failures += 1;
   consola.error('FAIL 匹配断言执行异常: ', error);

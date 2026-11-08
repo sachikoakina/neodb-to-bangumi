@@ -118,7 +118,7 @@ describe('候选裁决（年份三态 + 歧义）', () => {
     expect(multiple.status).toBe('ambiguous');
   });
 
-  it('候选年份未知：单候选通过', async () => {
+  it('候选年份未知：单候选通过（非严格模式基线）', async () => {
     const picked = await pickExactMatch([subject({ id: 20 })], 2001, 1);
     expect(picked).toEqual({
       status: 'matched',
@@ -229,3 +229,98 @@ describe('媒体形态裁决', () => {
     expect(picked.status).toBe('matched');
   });
 });
+
+describe('证据严格模式（strict，SYNC_MATCH_STRICT=1）', () => {
+  it('唯一候选年份未知且平台不可判定 → 证据不足持留，不写入', async () => {
+    // 事故 407681（猫鼠游戏）/345819（笑傲江湖WEB）的复现：候选年度 "\*"、平台为空。
+    const held = await pickExactMatch([subject({ id: 20 })], 2001, 1, {
+      strict: true,
+    });
+    expect(held).toEqual({
+      status: 'ambiguous',
+      candidates: [expect.objectContaining({ id: 20 })],
+      hold: 'insufficient-evidence',
+    });
+  });
+
+  it('同一候选关闭 strict → 保持旧行为（证据缺失照写）', async () => {
+    const picked = await pickExactMatch([subject({ id: 21 })], 2001, 1, {
+      strict: false,
+    });
+    expect(picked.status).toBe('matched');
+  });
+
+  it('年份经双方核对通过 → 命中', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 22, air_year: 2001 })],
+      2002,
+      1,
+      { strict: true },
+    );
+    expect(picked).toEqual({
+      status: 'matched',
+      subject: expect.objectContaining({ id: 22 }),
+    });
+  });
+
+  it('形态互证（源 movie ↔ 候选 剧场版）→ 命中', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 23, platform: '剧场版' })],
+      null,
+      1,
+      { strict: true, mediaForm: 'movie' },
+    );
+    expect(picked.status).toBe('matched');
+  });
+
+  it('源年份未知时候选年份无法核对 → 持留', async () => {
+    // 候选年份已知但源侧缺失，年份证据无从验证；平台又不可判定 → 不写。
+    const picked = await pickExactMatch(
+      [subject({ id: 24, air_year: 1985 })],
+      null,
+      1,
+      { strict: true },
+    );
+    expect(holdInsufficient(picked)).toBe(true);
+  });
+
+  it('形态冲突照旧拒绝，严格模式不放宽', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 25, platform: 'TV' })],
+      null,
+      1,
+      { strict: true, mediaForm: 'movie' },
+    );
+    expect(picked.status).toBe('no-candidate');
+  });
+
+  it('书籍候选不参与严格模式（证据读取方未覆盖，T5 前保持原行为）', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 26, type: 1, date: '1999-01-01' })],
+      2020,
+      1,
+      { strict: true },
+    );
+    expect(picked.status).toBe('matched');
+  });
+
+  it('多候选并列 → 歧义（无持留标记，与 strict 持留可区分）', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 27 }), subject({ id: 28 })],
+      null,
+      1,
+      { strict: true },
+    );
+    expect(picked).toEqual({
+      status: 'ambiguous',
+      candidates: [
+        expect.objectContaining({ id: 27 }),
+        expect.objectContaining({ id: 28 }),
+      ],
+    });
+  });
+});
+
+function holdInsufficient(picked: { status: string; hold?: string }): boolean {
+  return picked.status === 'ambiguous' && picked.hold === 'insufficient-evidence';
+}

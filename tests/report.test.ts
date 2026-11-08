@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   assertReportInvariant,
+  buildMatchAuditDocument,
   createReport,
   pruneUnmatched,
   record,
   renderSummaryMarkdown,
+  saveMatchAudit,
   upsertUnmatched,
+  type MatchAuditEntry,
 } from '../src/sync-report';
 
 describe('PathReport 恒等式', () => {
@@ -171,5 +177,51 @@ describe('待核对名单老化清理', () => {
       entries: new Map(),
       removed: 0,
     });
+  });
+});
+
+describe('匹配审计文档', () => {
+  const entry: MatchAuditEntry = {
+    uuid: 'abc123',
+    label: '猫鼠游戏',
+    category: 'movie',
+    shelf: 'complete',
+    via: 'title',
+    subjectId: 407681,
+    subjectName: '猫鼠游戏',
+    sourceYear: 2002,
+    sourceMediaForm: 'movie',
+    candidateYear: null,
+    candidateMediaForm: null,
+    candidates: [407681],
+    strictHold: false,
+    outcome: 'written',
+    reason: 'status',
+  };
+
+  const meta = {
+    startedAt: '2026-11-08T00:00:00.000Z',
+    finishedAt: '2026-11-08T01:00:00.000Z',
+    dryRun: true,
+    fullSync: true,
+    matchStrict: true,
+    yearTolerance: 1,
+  };
+
+  it('文档携带版本与运行元数据，条目原样透传', () => {
+    const doc = buildMatchAuditDocument(meta, [entry]);
+    expect(doc).toEqual({ version: 1, ...meta, entries: [entry] });
+  });
+
+  it('dry-run 也能落盘：文件可读回且内容一致', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'audit-'));
+    try {
+      const path = join(dir, 'nested', 'match-audit.json');
+      const doc = buildMatchAuditDocument(meta, [entry]);
+      saveMatchAudit(path, doc);
+      expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(doc);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

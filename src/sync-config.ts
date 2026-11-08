@@ -33,6 +33,8 @@ export const ENV_KEYS: readonly string[] = [
   'SYNC_SHELF_TYPES',
   'SYNC_CATEGORIES',
   'SYNC_YEAR_TOLERANCE',
+  'SYNC_MATCH_STRICT',
+  'SYNC_MATCH_AUDIT_FILE',
   'SYNC_NEODB_BANGUMI_RATING',
   'SYNC_NEODB_BANGUMI_COMMENT',
   'SYNC_STATUS_GUARD',
@@ -180,6 +182,13 @@ export type SyncConfig = {
     shelfTypes: ShelfType[];
     categories: CategoryAllowlist;
     yearTolerance: number;
+    /**
+     * 匹配严格模式：唯一同名候选若年份无法核对且形态不可判定 → 转待核对，
+     * 不自动写入。默认开启——宁可漏配，不可错配。
+     */
+    matchStrict: boolean;
+    /** 匹配审计产物路径：每条目的匹配对象、证据与结局。 */
+    matchAuditFile: string;
     ratingProfile: RatingMergeProfile;
     commentProfile: CommentMergeProfile;
     statusGuard: StatusGuard;
@@ -228,6 +237,8 @@ export function loadSyncConfig(): SyncConfig {
         process.env.SYNC_CATEGORIES,
       ),
       yearTolerance: Math.max(0, envNumber('SYNC_YEAR_TOLERANCE', 1)),
+      matchStrict: envEnabled('SYNC_MATCH_STRICT', true),
+      matchAuditFile: envString('SYNC_MATCH_AUDIT_FILE', '.cache/match-audit.json'),
       ratingProfile: parseEnum(
         'SYNC_NEODB_BANGUMI_RATING',
         process.env.SYNC_NEODB_BANGUMI_RATING,
@@ -300,7 +311,8 @@ export function describeSyncConfig(config: SyncConfig): string {
         ? `${s.reviewStateMaxAgeDays} 天未出现后清理`
         : '永不清理'
     }）`,
-    `  年份容差: ${s.yearTolerance}`,
+    `  年份容差: ${s.yearTolerance}｜匹配严格: ${s.matchStrict ? 1 : 0}`,
+    `  匹配审计: ${s.matchAuditFile}`,
   ].join('\n');
 }
 

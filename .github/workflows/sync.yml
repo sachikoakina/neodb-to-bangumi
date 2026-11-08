@@ -64,6 +64,8 @@ jobs:
       SYNC_SHELF_TYPES: ${{ vars.SYNC_SHELF_TYPES || 'wishlist,progress,complete,dropped' }}
       SYNC_CATEGORIES: ${{ vars.SYNC_CATEGORIES || 'book,movie,tv,music,game' }}
       SYNC_YEAR_TOLERANCE: ${{ vars.SYNC_YEAR_TOLERANCE || '1' }}
+      # 匹配严格模式：唯一同名候选证据不足时转待核对，不自动写入（宁可漏配，不可错配）。
+      SYNC_MATCH_STRICT: ${{ vars.SYNC_MATCH_STRICT || '1' }}
       SYNC_NEODB_BANGUMI_RATING: ${{ vars.SYNC_NEODB_BANGUMI_RATING || 'bangumi_prefer' }}
       SYNC_NEODB_BANGUMI_COMMENT: ${{ vars.SYNC_NEODB_BANGUMI_COMMENT || 'bangumi_prefer' }}
       SYNC_STATUS_GUARD: ${{ vars.SYNC_STATUS_GUARD || 'off' }}
@@ -83,6 +85,8 @@ jobs:
       REVIEW_STATE_MAX_AGE_DAYS: ${{ vars.REVIEW_STATE_MAX_AGE_DAYS || '30' }}
       SYNC_REPORT_FILE: ${{ vars.SYNC_REPORT_FILE || '.cache/sync-report.json' }}
       SYNC_SUMMARY_FILE: ${{ vars.SYNC_SUMMARY_FILE || '.cache/sync-summary.md' }}
+      # 匹配审计：每条目的匹配对象、证据与结局，错配可离线复核。
+      SYNC_MATCH_AUDIT_FILE: ${{ vars.SYNC_MATCH_AUDIT_FILE || '.cache/match-audit.json' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -181,6 +185,7 @@ jobs:
           retention-days: 7
 
       # 待核对状态载体：与 7 天的本轮报表分开，长期保留供人工跟进。
+      # 匹配审计同样长期保留：错配复核与清理清单都以它为依据。
       # artifact 名只用 UTC 时间戳；90 天是公开仓库允许的上限。
       - name: Upload the review state
         if: always()
@@ -189,6 +194,7 @@ jobs:
           name: review-state-${{ github.run_id }}-${{ steps.run_start.outputs.value }}-stock
           path: |
             .cache/unmatched.json
+            .cache/match-audit.json
             .cache/sync-summary.md
           if-no-files-found: warn
           retention-days: 90

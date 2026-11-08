@@ -8,7 +8,12 @@ import { dirname } from 'node:path';
 import { consola } from 'consola';
 import { describeSyncConfig, loadSyncConfig } from './sync-config';
 import runNeodbToBangumi from './paths/neodb-to-bangumi';
-import { assertReportInvariant, renderSummaryMarkdown } from './sync-report';
+import {
+  assertReportInvariant,
+  buildMatchAuditDocument,
+  renderSummaryMarkdown,
+  saveMatchAudit,
+} from './sync-report';
 
 async function main(): Promise<void> {
   const config = loadSyncConfig();
@@ -23,6 +28,26 @@ async function main(): Promise<void> {
     process.exitCode = 2;
     return;
   }
+
+  // 匹配审计先于恒等式校验落盘：计数出错的轮次恰恰最需要审计留痕。
+  // dry-run 同样产出——审计的价值正在于「写之前看清楚」。
+  saveMatchAudit(
+    config.sync.matchAuditFile,
+    buildMatchAuditDocument(
+      {
+        startedAt,
+        finishedAt,
+        dryRun: config.sync.dryRun,
+        fullSync: config.sync.fullSync,
+        matchStrict: config.sync.matchStrict,
+        yearTolerance: config.sync.yearTolerance,
+      },
+      result.matchAudit,
+    ),
+  );
+  consola.info(
+    `匹配审计已写入: ${config.sync.matchAuditFile}（${result.matchAudit.length} 条）`,
+  );
 
   if (!assertReportInvariant(result.report)) {
     consola.error(

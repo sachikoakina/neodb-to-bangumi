@@ -13,6 +13,12 @@
  * 媒体形态只在双方都能判定时生效：NeoDB `category=movie/tv` 对比 Bangumi
  * `platform`（剧场版/电影 → movie；TV/Web/电视剧/动态漫画 → tv）。OVA 等
  * 无法判定的平台既不放行也不拒绝，交由年份与歧义规则处理。
+ *
+ * 严格模式（`strict`，由 `SYNC_MATCH_STRICT` 控制）：三态规则把「证据缺失」
+ * 当「通过」，历史上曾让「候选年份 `\*` + 平台为空」的冷门条目被同名热门
+ * 电影错配。开启后，动画/真人类的**唯一**候选若年份无法核对（任一侧未知）
+ * 且双方形态无法相互印证，视为「证据不足」转 ambiguous（进待核对名单）——
+ * 宁可漏配，不可错配。书籍/音乐/游戏候选的证据读取方未覆盖，不参与此规则。
  */
 import type { BangumiSubject, NeodbItem } from '../types';
 
@@ -149,7 +155,12 @@ export type MatchEvidence = {
 
 export type MatchPick =
   | { status: 'matched'; subject: BangumiSubject }
-  | { status: 'ambiguous'; candidates: BangumiSubject[] }
+  | {
+      status: 'ambiguous';
+      candidates: BangumiSubject[];
+      /** 歧义成因：多候选并列，或唯一候选证据不足（strict 模式持留）。 */
+      hold?: 'insufficient-evidence';
+    }
   | { status: 'no-candidate' };
 
 export type MatchPickOptions = {
@@ -157,6 +168,12 @@ export type MatchPickOptions = {
   mediaForm?: MediaForm | null;
   /** 由调用方注入证据读取（可能需要读完整条目），测试可传普通函数。 */
   resolveEvidence?: (subject: BangumiSubject) => Promise<MatchEvidence> | MatchEvidence;
+  /**
+   * 严格模式：类型 2/6 的唯一候选若「年份无法核对（任一侧未知）」且
+   * 「双方形态无法相互印证」，不自动命中，转 ambiguous 并标记
+   * `hold: 'insufficient-evidence'`。默认关闭（保持三态原语义）。
+   */
+  strict?: boolean;
 };
 
 /**
@@ -166,8 +183,8 @@ export type MatchPickOptions = {
  * 1. 逐候选取年份与媒体形态；
  * 2. 年份过滤（仅类型 2/6）：源未知不比较；候选未知通过；
  * 3. 媒体形态过滤：双方可判定且冲突才拒绝；
- * 4. 剩余一个 → 命中；多个 → 按年份距离取唯一最小者；
- *    距离并列或全部不可知 → ambiguous。
+ * 4. 剩余一个 → 命中（strict 下需年份核对或形态互证，否则证据不足持留）；
+ *    多个 → 按年份距离取唯一最小者；距离并列或全部不可知 → ambiguous。
  *
  * 相比旧的 first-hit，这里**不再**返回第一个通过者：多个同样可信的
  * 候选意味着证据不足，写入任何一个都可能选错作品。
@@ -190,7 +207,11 @@ export async function pickExactMatch(
     }));
 
   const allowedDrift = Math.max(0, tolerance);
-  const viable: Array<{ subject: BangumiSubject; distance: number | null }> = [];
+  const viable: Array<{
+    subject: BangumiSubject;
+    distance: number | null;
+    evidence: MatchEvidence;
+  }> = [];
 
   for (const candidate of candidates) {
     const evidence = await resolveEvidence(candidate);
@@ -216,14 +237,33 @@ export async function pickExactMatch(
       isYearFilterType(candidate.type) && expectedYear != null && evidence.year != null
         ? Math.abs(evidence.year - expectedYear)
         : null;
-    viable.push({ subject: candidate, distance });
+    viable.push({ subject: candidate, distance, evidence });
   }
 
   if (!viable.length) {
     return { status: 'no-candidate' };
   }
   if (viable.length === 1) {
-    return { status: 'matched', subject: viable[0]!.subject };
+    const only = viable[0]!;
+    // 严格模式下的「证据不足持留」：三态规则把候选/源任一侧的年份缺失当成
+    // 「通过」，形态不可判定也不拒绝——同名候选因此可能零证据命中。此处要求
+    // 唯一候选至少有一项正向佐证：年份经双方核对（distance 已算出），或双方
+    // 形态均可判定（走到这里说明形态未冲突，即互证）。书籍/音乐/游戏候选
+    // 的证据读取方未覆盖，不参与此规则。
+    const formVerified = only.evidence.mediaForm != null && options.mediaForm != null;
+    if (
+      options.strict &&
+      isYearFilterType(only.subject.type) &&
+      only.distance == null &&
+      !formVerified
+    ) {
+      return {
+        status: 'ambiguous',
+        candidates: [only.subject],
+        hold: 'insufficient-evidence',
+      };
+    }
+    return { status: 'matched', subject: only.subject };
   }
 
   // 只有已知年份的候选参与「接近度」比较；全部不可知时视为并列。

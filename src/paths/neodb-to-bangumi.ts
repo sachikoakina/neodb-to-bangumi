@@ -75,12 +75,25 @@ import {
   record,
   saveUnmatched,
   upsertUnmatched,
+  type MatchAuditEntry,
   type PathReport,
   type UnmatchedMap,
 } from '../sync-report';
 import type { BangumiSubject, NeodbItem, NeodbShelfMark, ShelfType } from '../types';
 
 type ItemOutcome = 'written' | 'unchanged' | 'skipped' | 'unresolved' | 'failed';
+
+/** 匹配证据留痕：写入匹配审计，错配可离线复核。 */
+type MatchEvidenceInfo = {
+  sourceYear: number | null;
+  sourceMediaForm: MediaForm | null;
+  candidateYear: number | null;
+  candidateMediaForm: MediaForm | null;
+  /** 参与裁决的精确同名候选 id（含未命中者）。 */
+  candidateIds: number[] | null;
+  /** strict 模式下因证据不足被持留。 */
+  strictHold: boolean;
+};
 
 type SyncContext = {
   config: SyncConfig;
@@ -93,14 +106,24 @@ type SyncContext = {
   targetClaims: Map<number, TargetClaim>;
   unmatched: UnmatchedMap;
   aborted: boolean;
+  /** 匹配审计：按处理顺序累积，运行结束统一落盘（含 dry-run）。 */
+  matchAudit: MatchAuditEntry[];
 };
 
 type MatchResult =
-  | { kind: 'matched'; subjectId: number; via: TargetClaim['via'] }
+  | {
+      kind: 'matched';
+      subjectId: number;
+      via: TargetClaim['via'];
+      /** 命中条目名；link 直连不额外发请求，为 null。 */
+      subjectName: string | null;
+      evidence: MatchEvidenceInfo | null;
+    }
   | {
       kind: 'unresolved';
       reason:
         'no-bangumi-match' | 'bangumi-all-rejected-by-year' | 'ambiguous-bangumi-match';
+      evidence: MatchEvidenceInfo | null;
     }
   | {
       kind: 'failed';
@@ -118,6 +141,7 @@ export type SyncRunResult = {
   report: PathReport;
   unmatched: UnmatchedMap;
   truncatedShelves: ShelfType[];
+  matchAudit: MatchAuditEntry[];
 };
 
 export default async function runNeodbToBangumi(
@@ -130,16 +154,34 @@ export default async function runNeodbToBangumi(
   // ── 凭据探测：认证失败中止链路，不带病运行 ──
   if (!neodbToken || !(await verifyNeodbToken())) {
     consola.error('NeoDB 凭据不可用，链路中止。');
-    return { aborted: 'neodb-auth', report, unmatched, truncatedShelves };
+    return {
+      aborted: 'neodb-auth',
+      report,
+      unmatched,
+      truncatedShelves,
+      matchAudit: [],
+    };
   }
   if (!bangumiToken) {
     consola.error('BANGUMI_ACCESS_TOKEN 未设置，链路中止。');
-    return { aborted: 'bangumi-auth', report, unmatched, truncatedShelves };
+    return {
+      aborted: 'bangumi-auth',
+      report,
+      unmatched,
+      truncatedShelves,
+      matchAudit: [],
+    };
   }
   const me = await getBangumiMe();
   if (!me) {
     consola.error('无法确认 Bangumi 账号身份，链路中止。');
-    return { aborted: 'bangumi-auth', report, unmatched, truncatedShelves };
+    return {
+      aborted: 'bangumi-auth',
+      report,
+      unmatched,
+      truncatedShelves,
+      matchAudit: [],
+    };
   }
 
   const state: SyncState =
@@ -156,6 +198,7 @@ export default async function runNeodbToBangumi(
     targetClaims: new Map(),
     unmatched,
     aborted: false,
+    matchAudit: [],
   };
 
   // 全量游标：只有正式的全量运行读写它；dry-run 不推进。
@@ -269,6 +312,7 @@ export default async function runNeodbToBangumi(
     report,
     unmatched,
     truncatedShelves,
+    matchAudit: ctx.matchAudit,
   };
 }
 
@@ -285,15 +329,38 @@ async function processMark(
   const label = item.display_title || item.title || item.uuid;
   const fingerprint = fingerprintMark(mark);
 
+  // 匹配审计：每条处理的条目记录匹配对象、证据与结局，运行结束统一落盘。
+  const audit: MatchAuditEntry = {
+    uuid: item.uuid,
+    label,
+    category: String(item.category),
+    shelf: String(mark.shelf_type),
+    via: null,
+    subjectId: null,
+    subjectName: null,
+    sourceYear: null,
+    sourceMediaForm: null,
+    candidateYear: null,
+    candidateMediaForm: null,
+    candidates: null,
+    strictHold: false,
+    outcome: 'skipped',
+    reason: null,
+  };
+  const finish = (outcome: ItemOutcome, reason: string | null = null): ItemOutcome => {
+    ctx.matchAudit.push({ ...audit, outcome, reason });
+    return outcome;
+  };
+
   // 分类白名单（三态，写错配置时已在解析期失败在关闭一侧）。
   if (!categoryAllowed(config.sync.categories, item.category)) {
-    return 'skipped';
+    return finish('skipped', 'category-not-allowed');
   }
 
   // Bangumi 不支持该分类（podcast / performance）。
   if (!isBangumiSupportedCategory(item.category)) {
     consola.info(`Bangumi 无对应分类，跳过: ${item.category} ${label}`);
-    return 'skipped';
+    return finish('skipped', 'unsupported-category');
   }
 
   // ── 匹配 ──
@@ -303,14 +370,26 @@ async function processMark(
       throw new AuthAbortError(match.reason);
     }
     consola.warn(`匹配失败，记 failed（下轮可重试）: ${match.reason} ${label}`);
-    return 'failed';
+    return finish('failed', match.reason);
   }
   if (match.kind === 'unresolved') {
     recordUnmatched(ctx, mark, match.reason, label);
     consola.info(`未匹配 Bangumi 条目（${match.reason}），记入待核对: ${label}`);
-    return 'unresolved';
+    return finish('unresolved', match.reason);
   }
 
+  // 命中：把匹配方式、证据与候选清单带入审计。
+  audit.via = match.via;
+  audit.subjectId = match.subjectId;
+  audit.subjectName = match.subjectName;
+  if (match.evidence) {
+    audit.sourceYear = match.evidence.sourceYear;
+    audit.sourceMediaForm = match.evidence.sourceMediaForm;
+    audit.candidateYear = match.evidence.candidateYear;
+    audit.candidateMediaForm = match.evidence.candidateMediaForm;
+    audit.candidates = match.evidence.candidateIds;
+    audit.strictHold = match.evidence.strictHold;
+  }
   const subjectId = match.subjectId;
 
   // ── 目标认领：同一 subject 只让最强标记写入 ──
@@ -335,13 +414,13 @@ async function processMark(
         `kept=${incumbent.neodbUuid}(${incumbent.via},${incumbent.shelfType}) ` +
         `skipped=${item.uuid}(${claim.via},${claim.shelfType})`,
     );
-    return 'skipped';
+    return finish('skipped', 'duplicate-target');
   }
 
   // ── 读取目标收藏：error 绝不当作 absent ──
   const existingRes = await getBangumiCollection(ctx.username, subjectId);
   if (existingRes.status === 'error') {
-    return 'failed';
+    return finish('failed', 'target-read-failed');
   }
   const existing = existingRes.status === 'found' ? existingRes.value : null;
 
@@ -353,15 +432,15 @@ async function processMark(
   );
   if (status.kind === 'unknown-shelf-type') {
     consola.warn(`无法识别的 NeoDB 书架状态「${mark.shelf_type}」，跳过: ${label}`);
-    return 'skipped';
+    return finish('skipped', 'unknown-shelf-type');
   }
   if (status.kind === 'skip-on-hold') {
     consola.info(`Bangumi 现有「搁置」，NeoDB 无法表达该状态，保留: ${label}`);
-    return 'skipped';
+    return finish('skipped', 'hold-protected');
   }
   if (status.kind === 'no-downgrade') {
     consola.info(`状态保护：Bangumi 已「看过」，不降级为想看/在看: ${label}`);
-    return 'skipped';
+    return finish('skipped', 'no-downgrade-protected');
   }
 
   // 只有真正进入写入判定的标记才占位。
@@ -411,7 +490,7 @@ async function processMark(
   ) {
     const subjectRes = await getBangumiSubject(subjectId);
     if (subjectRes.status !== 'found') {
-      return 'failed';
+      return finish('failed', 'subject-read-failed');
     }
     const plan = planBookProgress(
       existing ?? { ep_status: 0, vol_status: 0 },
@@ -426,7 +505,7 @@ async function processMark(
 
   if (!differs && epStatus == null && volStatus == null) {
     rememberState(ctx, item.uuid, fingerprint);
-    return 'unchanged';
+    return finish('unchanged');
   }
 
   const reasons = [
@@ -449,7 +528,7 @@ async function processMark(
         `comment=${JSON.stringify(existing?.comment ?? '')}→${JSON.stringify(comment)} ` +
         `private=${existing?.private ?? 'none'}→${privatePlan.private}${extras}（${label}）`,
     );
-    return 'written';
+    return finish('written', `plan:${reasons.join('+')}`);
   }
 
   const ok = await upsertBangumiCollection(subjectId, {
@@ -461,7 +540,7 @@ async function processMark(
     ...(volStatus != null ? { vol_status: volStatus } : {}),
   });
   if (!ok) {
-    return 'failed';
+    return finish('failed', 'collection-write-failed');
   }
 
   consola.info(
@@ -486,7 +565,7 @@ async function processMark(
   }
 
   rememberState(ctx, item.uuid, fingerprint);
-  return 'written';
+  return finish('written', reasons.join('+'));
 }
 
 function rememberState(ctx: SyncContext, uuid: string, fingerprint: string): void {
@@ -523,18 +602,26 @@ function recordUnmatched(
  * 与旧实现的区别：
  * - 搜索失败不再等于「没有结果」，而是 failed（可重跑）；
  * - 年份读取失败同样记 failed，而不是退化成无年份匹配；
- * - 多候选不再取第一个，证据不足时记 ambiguous 而不是猜。
+ * - 多候选不再取第一个，证据不足时记 ambiguous 而不是猜；
+ * - strict 下唯一候选证据不足同样持留（insufficient-evidence）；
+ * - 匹配证据随结果返回，供匹配审计留痕。
  */
 async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchResult> {
   // 第一级：NeoDB 条目自带 Bangumi 外链时直接使用，最可靠。
   const linked = extractBangumiSubjectId(item.external_resources);
   if (linked != null) {
-    return { kind: 'matched', subjectId: linked, via: 'link' };
+    return {
+      kind: 'matched',
+      subjectId: linked,
+      via: 'link',
+      subjectName: null,
+      evidence: null,
+    };
   }
 
   const types = neodbCategoryToBangumiSubjectTypes(item.category);
   if (!types.length) {
-    return { kind: 'unresolved', reason: 'no-bangumi-match' };
+    return { kind: 'unresolved', reason: 'no-bangumi-match', evidence: null };
   }
 
   const yearRes = await resolveItemYear(item, ctx);
@@ -547,6 +634,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
 
   const mediaForm = neodbCategoryToMediaForm(item.category);
   let sawExact = false;
+  let lastExactIds: number[] | null = null;
 
   // 第二级：按候选标题依次搜索；第三级：精确同名 + 证据裁决。
   for (const title of titleCandidates(item)) {
@@ -565,6 +653,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
       continue;
     }
     sawExact = true;
+    lastExactIds = exact.map((s) => s.id);
 
     const picked = await pickExactMatch(
       exact,
@@ -572,31 +661,75 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
       ctx.config.sync.yearTolerance,
       {
         mediaForm,
+        strict: ctx.config.sync.matchStrict,
         resolveEvidence: (subject) => resolveCandidateEvidence(subject, ctx),
       },
     );
 
     if (picked.status === 'matched') {
+      // 挑选过程中已读过证据（有缓存），这里复取一次用于审计留痕。
+      const evidence = await resolveCandidateEvidence(picked.subject, ctx);
       consola.info(
         `Bangumi 匹配: uuid=${item.uuid} via=title title="${title}" ` +
           `year=${yearRes.year ?? 'missing'} media=${mediaForm ?? 'unknown'} ` +
           `candidates=${exact.length} chosen=${picked.subject.id}`,
       );
-      return { kind: 'matched', subjectId: picked.subject.id, via: 'title' };
+      return {
+        kind: 'matched',
+        subjectId: picked.subject.id,
+        via: 'title',
+        subjectName: picked.subject.name_cn || picked.subject.name,
+        evidence: {
+          sourceYear: yearRes.year,
+          sourceMediaForm: mediaForm,
+          candidateYear: evidence.year,
+          candidateMediaForm: evidence.mediaForm,
+          candidateIds: lastExactIds,
+          strictHold: false,
+        },
+      };
     }
     if (picked.status === 'ambiguous') {
       consola.warn(
         `同名候选无法唯一裁决: uuid=${item.uuid} title="${title}" ` +
           `year=${yearRes.year ?? 'missing'} media=${mediaForm ?? 'unknown'} ` +
-          `candidates=${picked.candidates.map((c) => c.id).join(',')}`,
+          `candidates=${picked.candidates
+            .map((c) => `${c.id}(${c.name_cn || c.name})`)
+            .join(',')}`,
       );
-      return { kind: 'unresolved', reason: 'ambiguous-bangumi-match' };
+      // 单候选歧义 = strict 证据持留；取该候选证据留痕（有缓存，零额外请求）。
+      const held =
+        picked.candidates.length === 1
+          ? await resolveCandidateEvidence(picked.candidates[0]!, ctx)
+          : null;
+      return {
+        kind: 'unresolved',
+        reason: 'ambiguous-bangumi-match',
+        evidence: {
+          sourceYear: yearRes.year,
+          sourceMediaForm: mediaForm,
+          candidateYear: held?.year ?? null,
+          candidateMediaForm: held?.mediaForm ?? null,
+          candidateIds: picked.candidates.map((c) => c.id),
+          strictHold: picked.hold === 'insufficient-evidence',
+        },
+      };
     }
   }
 
   return {
     kind: 'unresolved',
     reason: sawExact ? 'bangumi-all-rejected-by-year' : 'no-bangumi-match',
+    evidence: sawExact
+      ? {
+          sourceYear: yearRes.year,
+          sourceMediaForm: mediaForm,
+          candidateYear: null,
+          candidateMediaForm: null,
+          candidateIds: lastExactIds,
+          strictHold: false,
+        }
+      : null,
   };
 }
 

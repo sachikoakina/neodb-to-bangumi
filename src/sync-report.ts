@@ -155,6 +155,59 @@ export function pruneUnmatched(
   return { entries: next, removed };
 }
 
+// ─── 匹配审计 ───────────────────────────────────────────────────────────
+//
+// 每条进入处理的条目记录「为什么被写到了这个 subject」（或为什么没写）。
+// 日志会滚走、unmatched.json 只覆盖未匹配侧，这份产物让错配可以离线复核，
+// 也是清理脚本（撤销错配收藏）的输入来源。
+
+export type MatchAuditEntry = {
+  uuid: string;
+  label: string;
+  category: string;
+  shelf: string;
+  /** 匹配方式：link = NeoDB 外链直连；title = 标题搜索；null = 未进入匹配。 */
+  via: 'link' | 'title' | null;
+  subjectId: number | null;
+  /** 命中条目名；仅标题匹配可即时获得（link 直连不额外发请求补名字）。 */
+  subjectName: string | null;
+  sourceYear: number | null;
+  sourceMediaForm: string | null;
+  candidateYear: number | null;
+  candidateMediaForm: string | null;
+  /** 参与裁决的精确同名候选 id 列表（含未命中者）；未进入标题匹配为 null。 */
+  candidates: number[] | null;
+  /** strict 模式下因证据不足被持留（未写入）。 */
+  strictHold: boolean;
+  outcome: Outcome;
+  reason: string | null;
+};
+
+export type MatchAuditMeta = {
+  startedAt: string;
+  finishedAt: string;
+  dryRun: boolean;
+  fullSync: boolean;
+  matchStrict: boolean;
+  yearTolerance: number;
+};
+
+export type MatchAuditDocument = { version: 1 } & MatchAuditMeta & {
+    entries: MatchAuditEntry[];
+  };
+
+export function buildMatchAuditDocument(
+  meta: MatchAuditMeta,
+  entries: MatchAuditEntry[],
+): MatchAuditDocument {
+  return { version: 1, ...meta, entries };
+}
+
+export function saveMatchAudit(path: string, doc: MatchAuditDocument): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(doc, null, 2), 'utf8');
+}
+
 // ─── 摘要渲染 ───────────────────────────────────────────────────────────
 
 export type SummaryContext = {
