@@ -160,8 +160,9 @@ jobs:
           fi
 
       # 无论成败都保存状态：被超时杀掉的运行必须能续上，否则大书架永远走不到底。
+      # 文件不存在时（dry-run 不写状态、认证中止提前返回）跳过，避免 cache save 再叠一条红。
       - name: Save the incremental state
-        if: always() && !inputs.full_sync
+        if: always() && !inputs.full_sync && hashFiles('.cache/sync-state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: .cache/sync-state.json
@@ -169,7 +170,7 @@ jobs:
 
       # 全量游标同样无论成败都保存：中途被杀才有意义。
       - name: Save the full-sync cursor
-        if: always() && inputs.full_sync
+        if: always() && inputs.full_sync && hashFiles('.cache/full-sync-cursor.json') != ''
         uses: actions/cache/save@v4
         with:
           path: .cache/full-sync-cursor.json
