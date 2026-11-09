@@ -80,6 +80,9 @@ jobs:
       SYNC_MAX_EPISODES_PER_ITEM: ${{ vars.SYNC_MAX_EPISODES_PER_ITEM || '0' }}
       # 未匹配条目退避上限天数；0 = 每轮都重试。
       SYNC_UNMATCHED_RETRY_DAYS: ${{ vars.SYNC_UNMATCHED_RETRY_DAYS || '7' }}
+      # 条目级失败是否判红：默认 0，单条数据问题不再让定时任务永久红；
+      # 需要「有失败即红」时把仓库 Variable 设为 1。认证中止 / 报告异常仍判红。
+      SYNC_FAIL_ON_ITEM_ERRORS: ${{ vars.SYNC_FAIL_ON_ITEM_ERRORS || '0' }}
 
       # runner 是临时的，增量状态靠下方的 cache restore/save 跨运行保留；
       # 全量运行会忽略它，从头走一遍。

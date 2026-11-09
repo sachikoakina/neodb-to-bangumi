@@ -55,6 +55,7 @@ export const ENV_KEYS: readonly string[] = [
   'SYNC_TIME_BUDGET_MS',
   'SYNC_MAX_EPISODES_PER_ITEM',
   'SYNC_UNMATCHED_RETRY_DAYS',
+  'SYNC_FAIL_ON_ITEM_ERRORS',
 ];
 
 const VALID_CATEGORIES: readonly string[] = [
@@ -222,6 +223,13 @@ export type SyncConfig = {
     maxEpisodesPerItem: number;
     /** 未匹配条目的退避上限天数；0 表示不避让，每轮都重试。 */
     unmatchedRetryDays: number;
+    /**
+     * 严格退出码：有条目失败就把进程判红。
+     *
+     * 默认关闭 —— 一条数据问题不该让每晚的定时任务固定变红，失败条目仍会
+     * 计入报告、写入摘要并输出 Actions 注解。需要「有失败即红」时置 1。
+     */
+    failOnItemErrors: boolean;
   };
 };
 
@@ -308,6 +316,8 @@ export function loadSyncConfig(): SyncConfig {
         0,
         Math.floor(envNumber('SYNC_UNMATCHED_RETRY_DAYS', 7)),
       ),
+      // 默认宽松：条目失败只告警不判红，避免单条坏数据让定时任务永久红。
+      failOnItemErrors: envEnabled('SYNC_FAIL_ON_ITEM_ERRORS', false),
     },
   };
 }
@@ -343,6 +353,7 @@ export function describeSyncConfig(config: SyncConfig): string {
     `  时间预算: ${s.timeBudgetMs > 0 ? `${s.timeBudgetMs}ms` : '关闭'}` +
       `｜单条分集上限: ${s.maxEpisodesPerItem > 0 ? s.maxEpisodesPerItem : '不限'}` +
       `｜未匹配退避: ${s.unmatchedRetryDays > 0 ? `${s.unmatchedRetryDays} 天` : '关闭'}`,
+    `  条目失败判红: ${s.failOnItemErrors ? 1 : 0}（0 = 只告警，1 = 严格退出码）`,
   ].join('\n');
 }
 

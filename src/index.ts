@@ -1,11 +1,13 @@
 /**
  * CLI 入口：加载配置 → 打印生效配置 → 执行迁移 → 写报告 → 决定退出码。
  *
- * 退出码：0 成功；1 有 failed 条目或报告恒等式破坏；2 凭据/认证中止。
+ * 退出码（见 `rules/exit-code.ts`）：0 成功；1 报告恒等式破坏或（严格模式下）
+ * 有 failed 条目；2 凭据/认证中止。
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { consola } from 'consola';
+import { decideExitCode } from './rules/exit-code';
 import { describeSyncConfig, loadSyncConfig } from './sync-config';
 import runNeodbToBangumi from './paths/neodb-to-bangumi';
 import {
@@ -25,7 +27,12 @@ async function main(): Promise<void> {
 
   if (result.aborted) {
     consola.error(`链路中止（${result.aborted}），未继续写入。`);
-    process.exitCode = 2;
+    process.exitCode = decideExitCode({
+      aborted: true,
+      invariantOk: true,
+      failed: result.report.failed,
+      failOnItemErrors: config.sync.failOnItemErrors,
+    });
     return;
   }
 
@@ -49,11 +56,17 @@ async function main(): Promise<void> {
     `匹配审计已写入: ${config.sync.matchAuditFile}（${result.matchAudit.length} 条）`,
   );
 
-  if (!assertReportInvariant(result.report)) {
+  const invariantOk = assertReportInvariant(result.report);
+  if (!invariantOk) {
     consola.error(
       '报告计数不满足 scanned = written + unchanged + skipped + unresolved + failed',
     );
-    process.exitCode = 1;
+    process.exitCode = decideExitCode({
+      aborted: false,
+      invariantOk,
+      failed: result.report.failed,
+      failOnItemErrors: config.sync.failOnItemErrors,
+    });
     return;
   }
 
@@ -108,7 +121,19 @@ async function main(): Promise<void> {
   writeFileSync(config.sync.summaryFile, summary, 'utf8');
   consola.info(`报告已写入: ${config.sync.reportFile} / ${config.sync.summaryFile}`);
 
-  process.exitCode = report.failed > 0 ? 1 : 0;
+  const exitCode = decideExitCode({
+    aborted: false,
+    invariantOk,
+    failed: report.failed,
+    failOnItemErrors: config.sync.failOnItemErrors,
+  });
+  if (report.failed > 0 && !config.sync.failOnItemErrors) {
+    consola.warn(
+      `本轮 ${report.failed} 条失败：已记入报告与摘要，但按 ` +
+        'SYNC_FAIL_ON_ITEM_ERRORS=0 不判红；需要「有失败即红」时把它设为 1。',
+    );
+  }
+  process.exitCode = exitCode;
 }
 
 main().catch((error) => {

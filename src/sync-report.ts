@@ -3,7 +3,8 @@
  *
  * 每条链路返回统一 PathReport，并满足恒等式：
  *   scanned = written + unchanged + skipped + unresolved + failed
- * `failed` 或中止会让退出码非零；`unresolved` 单独不导致失败。
+ * `failed` 与 `unresolved` 都只是计数：退出码由 `rules/exit-code.ts` 分级决定
+ * （中止 → 2；恒等式破坏 → 1；条目失败仅在 `SYNC_FAIL_ON_ITEM_ERRORS=1` 时 → 1）。
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
