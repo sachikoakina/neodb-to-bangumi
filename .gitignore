@@ -3,3 +3,6 @@ node_modules/
 coverage/
 .env
 *.log
+
+# 编辑器/方案管理器的本地工作目录（方案稿与运行态数据），不属于项目交付物
+.codebuddy/
