@@ -579,7 +579,7 @@ async function processMark(
     commentDiffers ||
     privateDiffers;
 
-  // ── 书籍进度（迁移语义）：写入前规划，随收藏 upsert 同一请求提交 ──
+  // ── 书籍进度：源端已 complete，按总量拉满；随收藏 upsert 同一请求提交 ──
   let epStatus: number | undefined;
   let volStatus: number | undefined;
   if (
@@ -600,7 +600,6 @@ async function processMark(
     const plan = planBookProgress(
       existing ?? { ep_status: 0, vol_status: 0 },
       subjectRes.value,
-      { sourceComplete: true },
     );
     if (!plan.skip) {
       epStatus = plan.epStatus;
@@ -1009,19 +1008,20 @@ async function resolveCandidateEvidence(
   if (!isYearFilterType(subject.type)) {
     return { year: null, mediaForm: null };
   }
-  const full = await getFullSubject(subject.id, ctx);
+  // 搜索结果的体积只有 id/名称，年份与平台要回读完整条目；读不到就退回搜索结果里的年份。
+  const full = await readSubjectCached(subject.id, ctx.subjectCache);
+  const detail = full.status === 'found' ? full.value : null;
   return {
-    year: bangumiSubjectYear(subject) ?? (full ? bangumiSubjectYear(full) : null),
-    mediaForm: bangumiPlatformMediaForm(full?.platform),
+    year: bangumiSubjectYear(subject) ?? (detail ? bangumiSubjectYear(detail) : null),
+    mediaForm: bangumiPlatformMediaForm(detail?.platform),
   };
 }
 
 /**
  * 带缓存的条目读取，**保留三态**。
  *
- * 调用方（书籍进度）需要区分「读取失败」与「条目不存在」，因此不能像旧版
- * `getFullSubject` 那样只返回 `null`——那会把错误 message 丢掉。缓存只写成功
- * 结果，失败仍留给下一轮重试。
+ * 调用方需要区分「读取失败」与「条目不存在」：失败会把错误信息带上去记 `failed`，
+ * 而「不存在」是条目级问题。缓存只写成功结果，失败留给下一轮重试。
  *
  * `read` 可注入，便于离线断言「同一 subject 一轮只读一次」。
  */
@@ -1039,15 +1039,6 @@ export async function readSubjectCached(
     cache.set(subjectId, result.value);
   }
   return result;
-}
-
-/** 完整条目缓存：只缓存成功解析的，失败下轮重试。 */
-async function getFullSubject(
-  subjectId: number,
-  ctx: SyncContext,
-): Promise<BangumiSubject | null> {
-  const result = await readSubjectCached(subjectId, ctx.subjectCache);
-  return result.status === 'found' ? result.value : null;
 }
 
 /**
@@ -1096,8 +1087,8 @@ export type EpisodeProgressResult =
   | { kind: 'not-applicable'; reason: 'no-episodes' | 'not-collected' }
   | { kind: 'failed'; reason: EpisodeProgressFailureReason; message: string };
 
-/** 分集写入选项：`maxEpisodes` 为 0 表示不限（默认，保持旧行为）。 */
-export type EpisodeProgressOptions = {
+/** 分集写入选项：`maxEpisodes` 缺省或为 0 表示不限。 */
+type EpisodeProgressOptions = {
   maxEpisodes?: number;
 };
 

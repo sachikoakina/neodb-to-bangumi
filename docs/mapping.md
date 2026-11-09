@@ -84,6 +84,6 @@
 
 ## 与原项目（Audiovisual-Transporter）的差异
 
-- 书籍进度在迁移语境下以「源 complete」为拉满意图（`planBookProgress` 的 `sourceComplete` 分支）；原豆瓣链路的保守行为（0 视为未知不触碰）保留为缺省分支，两种语境一个纯函数。
+- 书籍进度只有一个语义：**源端 complete 即拉满**。`planBookProgress(existing, subject)` 按 `subject.eps` / `subject.volumes` 把对应维度推到上限，总量缺失的维度跳过；目标端当前进度为 0 不构成「未知维度」，不影响拉满。
 - 不引入标记时间策略：Bangumi 没有可写的收藏时间字段。
 - 其余规则（状态映射方向、年份三态过滤、分集幂等、401 中止、unresolved 语义、目标认领裁决）与原项目一致。

@@ -100,38 +100,47 @@ describe('分集拉满', () => {
   });
 });
 
-describe('书籍进度：迁移语义（sourceComplete=true）', () => {
-  it('总量已知的维度全部拉满', () => {
+describe('书籍进度：总量已知即拉满', () => {
+  it('两个维度都有总量 → 全部拉满', () => {
     expect(
-      planBookProgress(
-        { ep_status: 0, vol_status: 0 },
-        { eps: 12, volumes: 3 },
-        { sourceComplete: true },
-      ),
+      planBookProgress({ ep_status: 0, vol_status: 0 }, { eps: 12, volumes: 3 }),
     ).toEqual({ epStatus: 12, volStatus: 3, skip: false });
   });
 
+  it('目标端进度为 0 不是「未知维度」，照样拉满', () => {
+    expect(
+      planBookProgress({ ep_status: 0, vol_status: 1 }, { eps: 12, volumes: 3 }),
+    ).toEqual({ epStatus: 12, volStatus: 3, skip: false });
+  });
+
+  it('目标端进度超过上限时不回退（只跳过该维度）', () => {
+    expect(
+      planBookProgress({ ep_status: 20, vol_status: 3 }, { eps: 12, volumes: 3 }),
+    ).toEqual({ skip: true, reason: 'nothing-to-write' });
+  });
+
   it('总量缺失的维度跳过', () => {
-    expect(
-      planBookProgress(
-        { ep_status: 0, vol_status: 0 },
-        { eps: 12 },
-        { sourceComplete: true },
-      ),
-    ).toEqual({ epStatus: 12, volStatus: undefined, skip: false });
-    expect(
-      planBookProgress(
-        { ep_status: 0, vol_status: 0 },
-        { volumes: 2 },
-        { sourceComplete: true },
-      ),
-    ).toEqual({ epStatus: undefined, volStatus: 2, skip: false });
+    expect(planBookProgress({ ep_status: 0, vol_status: 0 }, { eps: 12 })).toEqual({
+      epStatus: 12,
+      volStatus: undefined,
+      skip: false,
+    });
+    expect(planBookProgress({ ep_status: 0, vol_status: 0 }, { volumes: 2 })).toEqual({
+      epStatus: undefined,
+      volStatus: 2,
+      skip: false,
+    });
   });
 
   it('两维度都无总量 → no-totals（无总量不瞎填）', () => {
-    expect(
-      planBookProgress({ ep_status: 0, vol_status: 0 }, {}, { sourceComplete: true }),
-    ).toEqual({
+    expect(planBookProgress({ ep_status: 0, vol_status: 0 }, {})).toEqual({
+      skip: true,
+      reason: 'no-totals',
+    });
+  });
+
+  it('总量为 0 视同缺失', () => {
+    expect(planBookProgress({ ep_status: 0, vol_status: 0 }, { eps: 0 })).toEqual({
       skip: true,
       reason: 'no-totals',
     });
@@ -139,32 +148,13 @@ describe('书籍进度：迁移语义（sourceComplete=true）', () => {
 
   it('已达上限不重写（幂等）', () => {
     expect(
-      planBookProgress(
-        { ep_status: 12, vol_status: 3 },
-        { eps: 12, volumes: 3 },
-        { sourceComplete: true },
-      ),
+      planBookProgress({ ep_status: 12, vol_status: 3 }, { eps: 12, volumes: 3 }),
     ).toEqual({ skip: true, reason: 'nothing-to-write' });
   });
-});
 
-describe('书籍进度：原保守语义（缺省）', () => {
-  it('0 视为未知维度不触碰', () => {
+  it('只有一个维度已达上限时，只写未达上限的维度', () => {
     expect(
-      planBookProgress({ ep_status: 0, vol_status: 0 }, { eps: 12, volumes: 3 }),
-    ).toEqual({
-      skip: true,
-      reason: 'both-unknown',
-    });
-  });
-
-  it('只拉满已有进度的维度', () => {
-    expect(
-      planBookProgress({ ep_status: 5, vol_status: 0 }, { eps: 12, volumes: 3 }),
-    ).toEqual({
-      epStatus: 12,
-      volStatus: undefined,
-      skip: false,
-    });
+      planBookProgress({ ep_status: 12, vol_status: 0 }, { eps: 12, volumes: 3 }),
+    ).toEqual({ epStatus: undefined, volStatus: 3, skip: false });
   });
 });

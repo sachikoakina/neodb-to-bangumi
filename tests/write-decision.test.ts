@@ -18,7 +18,7 @@ describe('写入判定', () => {
         bookProgress: false,
         progress: unchangedProgress,
       }),
-    ).toEqual({ outcome: 'unchanged', reason: null, needsWrite: false });
+    ).toEqual({ outcome: 'unchanged', reason: null });
   });
 
   it('收藏字段有差异 → 写入收藏，不因分集不适用而丢失', () => {
@@ -28,7 +28,7 @@ describe('写入判定', () => {
         bookProgress: false,
         progress: notApplicable,
       }),
-    ).toEqual({ outcome: 'written', reason: null, needsWrite: true });
+    ).toEqual({ outcome: 'written', reason: null });
   });
 
   it('书籍进度有值 → 写入收藏（进度随同一请求提交）', () => {
@@ -38,7 +38,7 @@ describe('写入判定', () => {
         bookProgress: true,
         progress: notApplicable,
       }),
-    ).toEqual({ outcome: 'written', reason: null, needsWrite: true });
+    ).toEqual({ outcome: 'written', reason: null });
   });
 
   it('只有分集进度产生写入 → written，且不触发收藏 upsert', () => {
@@ -48,7 +48,7 @@ describe('写入判定', () => {
         bookProgress: false,
         progress: writtenProgress,
       }),
-    ).toEqual({ outcome: 'written', reason: 'progress', needsWrite: false });
+    ).toEqual({ outcome: 'written', reason: 'progress' });
   });
 
   it('字段差异与分集写入同时存在 → 原因留给字段，不重复标注 progress', () => {
@@ -58,7 +58,7 @@ describe('写入判定', () => {
         bookProgress: false,
         progress: writtenProgress,
       }),
-    ).toEqual({ outcome: 'written', reason: null, needsWrite: true });
+    ).toEqual({ outcome: 'written', reason: null });
   });
 
   it('分集失败 → failed，但字段更新仍然提交', () => {
@@ -68,7 +68,7 @@ describe('写入判定', () => {
         bookProgress: false,
         progress: failedProgress,
       }),
-    ).toEqual({ outcome: 'failed', reason: 'episode-read-failed', needsWrite: true });
+    ).toEqual({ outcome: 'failed', reason: 'episode-read-failed' });
   });
 
   it('分集失败且字段无差异 → failed，不发收藏 upsert', () => {
@@ -78,7 +78,7 @@ describe('写入判定', () => {
         bookProgress: false,
         progress: failedProgress,
       }),
-    ).toEqual({ outcome: 'failed', reason: 'episode-read-failed', needsWrite: false });
+    ).toEqual({ outcome: 'failed', reason: 'episode-read-failed' });
   });
 
   it('分集未产生写入但有字段差异 → 仍按字段写入', () => {
@@ -88,6 +88,6 @@ describe('写入判定', () => {
         bookProgress: true,
         progress: unchangedProgress,
       }),
-    ).toEqual({ outcome: 'written', reason: null, needsWrite: true });
+    ).toEqual({ outcome: 'written', reason: null });
   });
 });

@@ -258,7 +258,7 @@ export type SummaryContext = {
   unmatchedByReason?: Record<string, number>;
   /**
    * 可选：阶段耗时与请求等待快照。
-   * 不传时摘要输出与旧版逐字节一致，保证既有调用点与断言不受影响。
+   * 不传时摘要里不出现「耗时」小节，其余区块照常渲染。
    */
   metrics?: RunMetricsSnapshot;
   /** 提前停止原因：条目配额或时间预算；未触发为 null/undefined。 */

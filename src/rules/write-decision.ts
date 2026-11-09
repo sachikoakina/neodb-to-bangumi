@@ -37,19 +37,15 @@ export type WriteDecision = {
    * - 失败时为具体原因（如 `episode-read-failed`）。
    */
   reason: string | null;
-  /**
-   * 是否需要发收藏 upsert。
-   *
-   * 分集进度不计入：它走独立的分集接口。分集失败时字段更新仍应提交，
-   * 因此这里只看 `differs || bookProgress`。
-   */
-  needsWrite: boolean;
 };
 
 /**
  * 判定本轮该记什么。
  *
- * - 分集失败 → `failed`（部分成功也要可见），但 `needsWrite` 仍按字段差异决定；
+ * 是否发收藏 upsert 由调用方按 `differs || bookProgress` 自行决定——分集进度走
+ * 独立接口，不参与这个判断。本函数只回答「这一条本轮算哪一种结果」。
+ *
+ * - 分集失败 → `failed`（部分成功也要可见）；
  * - 任何一路产生写入 → `written`；
  * - 三者都没有 → `unchanged`。
  */
@@ -60,19 +56,17 @@ export function decideWriteOutcome(input: {
   progress: ProgressSignal;
 }): WriteDecision {
   const { differs, bookProgress, progress } = input;
-  const needsWrite = differs || bookProgress;
 
   if (progress.kind === 'failed') {
-    return { outcome: 'failed', reason: progress.reason, needsWrite };
+    return { outcome: 'failed', reason: progress.reason };
   }
 
   if (differs || bookProgress || progress.kind === 'written') {
     return {
       outcome: 'written',
       reason: differs || bookProgress ? null : 'progress',
-      needsWrite,
     };
   }
 
-  return { outcome: 'unchanged', reason: null, needsWrite: false };
+  return { outcome: 'unchanged', reason: null };
 }

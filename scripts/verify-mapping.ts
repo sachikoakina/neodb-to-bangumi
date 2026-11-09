@@ -162,50 +162,32 @@ check(
   [1],
 );
 
-// ── 书籍进度：迁移语义（sourceComplete=true）──
+// ── 书籍进度：源端 complete 即拉满 ──
 check(
-  '迁移语义: 两维度都有总量则全拉满',
-  planBookProgress(
-    { ep_status: 0, vol_status: 0 },
-    { eps: 12, volumes: 3 },
-    { sourceComplete: true },
-  ),
+  '书籍进度: 两维度都有总量则全拉满',
+  planBookProgress({ ep_status: 0, vol_status: 0 }, { eps: 12, volumes: 3 }),
   { epStatus: 12, volStatus: 3, skip: false },
 );
 check(
-  '迁移语义: 总量缺失的维度跳过',
-  planBookProgress(
-    { ep_status: 0, vol_status: 0 },
-    { eps: 12 },
-    { sourceComplete: true },
-  ),
+  '书籍进度: 总量缺失的维度跳过',
+  planBookProgress({ ep_status: 0, vol_status: 0 }, { eps: 12 }),
   { epStatus: 12, volStatus: undefined, skip: false },
 );
 check(
-  '迁移语义: 两维度都无总量则 no-totals',
-  planBookProgress({ ep_status: 0, vol_status: 0 }, {}, { sourceComplete: true }),
+  '书籍进度: 两维度都无总量则 no-totals',
+  planBookProgress({ ep_status: 0, vol_status: 0 }, {}),
   { skip: true, reason: 'no-totals' },
 );
 check(
-  '迁移语义: 已达上限不重写（幂等）',
-  planBookProgress(
-    { ep_status: 12, vol_status: 3 },
-    { eps: 12, volumes: 3 },
-    { sourceComplete: true },
-  ),
+  '书籍进度: 已达上限不重写（幂等）',
+  planBookProgress({ ep_status: 12, vol_status: 3 }, { eps: 12, volumes: 3 }),
   { skip: true, reason: 'nothing-to-write' },
 );
 
-// ── 书籍进度：原保守语义（sourceComplete 缺省）──
 check(
-  '保守语义: 0 视为未知不触碰',
+  '书籍进度: 目标端 0 不视为未知，照样拉满',
   planBookProgress({ ep_status: 0, vol_status: 0 }, { eps: 12, volumes: 3 }),
-  { skip: true, reason: 'both-unknown' },
-);
-check(
-  '保守语义: 只拉满已知维度',
-  planBookProgress({ ep_status: 5, vol_status: 0 }, { eps: 12, volumes: 3 }),
-  { epStatus: 12, volStatus: undefined, skip: false },
+  { epStatus: 12, volStatus: 3, skip: false },
 );
 
 if (failures > 0) {

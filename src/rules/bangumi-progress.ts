@@ -72,61 +72,44 @@ export type BookProgressPlan = {
   epStatus?: number;
   volStatus?: number;
   skip: boolean;
-  reason?: 'both-unknown' | 'no-totals' | 'nothing-to-write';
+  reason?: 'no-totals' | 'nothing-to-write';
 };
 
 /**
- * 书籍进度拉满计划（写入随收藏 upsert 同一请求）。
+ * 书籍进度拉满计划（写入随收藏 upsert 同一请求提交）。
  *
- * 两种语境，由 `sourceComplete` 区分：
+ * 语义只有一种：**源端已确认 complete，因此要拉满**。只要 `subject.eps` /
+ * `subject.volumes` 总量已知，就把对应维度推到上限；总量缺失的维度跳过
+ * （无总量不瞎填）；已达上限的维度不重写，保证幂等。
  *
- * - `sourceComplete: false`（原项目豆瓣链路的保守行为）：`ep_status`/`vol_status`
- *   为 0 视为「未知维度」，不触碰；只拉满已有进度的维度。
- * - `sourceComplete: true`（本项目的迁移语义）：NeoDB 已确认 complete，拉满意图
- *   明确，只要 `subject.eps` / `subject.volumes` 总量已知就把该维度拉满；总量
- *   缺失的维度跳过（无总量不瞎填）。已达上限的维度不重写，保证幂等。
+ * 目标端现有进度为 0 不算「未知维度」——那是源端状态，不是目标端猜测的依据。
  */
 export function planBookProgress(
   existing: Pick<BangumiCollection, 'ep_status' | 'vol_status'>,
   subject: Pick<BangumiSubject, 'eps' | 'volumes'>,
-  options: { sourceComplete?: boolean } = {},
 ): BookProgressPlan {
-  if (options.sourceComplete) {
-    const epTotal = (subject.eps ?? 0) > 0 ? (subject.eps as number) : undefined;
-    const volTotal =
-      (subject.volumes ?? 0) > 0 ? (subject.volumes as number) : undefined;
-    if (epTotal == null && volTotal == null) {
-      return { skip: true, reason: 'no-totals' };
-    }
-    const epStatus =
-      epTotal != null && (existing.ep_status ?? 0) >= epTotal ? undefined : epTotal;
-    const volStatus =
-      volTotal != null && (existing.vol_status ?? 0) >= volTotal ? undefined : volTotal;
-    if (epStatus == null && volStatus == null) {
-      return { skip: true, reason: 'nothing-to-write' };
-    }
-    return { epStatus, volStatus, skip: false };
-  }
-
-  const chapterKnown = (existing.ep_status ?? 0) > 0;
-  const volumeKnown = (existing.vol_status ?? 0) > 0;
-  if (!chapterKnown && !volumeKnown) {
-    return { skip: true, reason: 'both-unknown' };
-  }
-
-  const epStatus = chapterKnown && (subject.eps ?? 0) > 0 ? subject.eps : undefined;
-  const volStatus =
-    volumeKnown && (subject.volumes ?? 0) > 0 ? subject.volumes : undefined;
-
-  if (epStatus == null && volStatus == null) {
+  const epTotal = positiveOrUndefined(subject.eps);
+  const volTotal = positiveOrUndefined(subject.volumes);
+  if (epTotal == null && volTotal == null) {
     return { skip: true, reason: 'no-totals' };
   }
 
-  const epDone = epStatus == null || (existing.ep_status ?? 0) >= epStatus;
-  const volDone = volStatus == null || (existing.vol_status ?? 0) >= volStatus;
-  if (epDone && volDone) {
+  const epStatus = reached(existing.ep_status, epTotal) ? undefined : epTotal;
+  const volStatus = reached(existing.vol_status, volTotal) ? undefined : volTotal;
+  if (epStatus == null && volStatus == null) {
     return { skip: true, reason: 'nothing-to-write' };
   }
 
   return { epStatus, volStatus, skip: false };
+}
+
+/** 总量只在正数时算「已知」，0 与缺失等价。 */
+function positiveOrUndefined(total: number | undefined): number | undefined {
+  return total != null && total > 0 ? total : undefined;
+}
+
+/** 目标已达上限（或该维度没有总量）时不重写。 */
+function reached(current: number | undefined, total: number | undefined): boolean {
+  if (total == null) return true;
+  return (current ?? 0) >= total;
 }

@@ -348,10 +348,13 @@ export function describeSyncConfig(config: SyncConfig): string {
 
 // ─── 增量状态 ───────────────────────────────────────────────────────────
 
+/** 状态文件的唯一版本号。读到其他版本一律丢弃，不做迁移。 */
+const STATE_VERSION = 2;
+
 /**
- * 增量状态（内存形态）。
+ * 增量状态（内存形态），字段与落盘形态一一对应。
  *
- * - `marks`：uuid → 指纹，与 v1 文件完全同形，**不参与任何迁移**；
+ * - `marks`：uuid → 指纹。指纹只覆盖收藏字段，**不含进度**；
  * - `targets`：uuid → 上次命中的 Bangumi subject，仅供诊断（清理错配时对照），
  *   刻意不参与匹配判定——否则一次错配会被永久复用；
  * - `progress`：uuid → `done`，表示该条的进度（书籍上限 / 分集）已拉满。
@@ -363,13 +366,13 @@ export type SyncState = {
   progress: Record<string, 'done'>;
 };
 
-/** 落盘形态：v1 只有 `marks`，v2 追加两个可选字段，旧版本读新文件仍只取 `marks`。 */
-export type SyncStateFile = {
-  version: 2;
+/** 落盘形态：版本号 + 三张表，全部必填。 */
+type SyncStateFile = {
+  version: typeof STATE_VERSION;
   updatedAt: string;
   marks: Record<string, string>;
-  targets?: Record<string, number>;
-  progress?: Record<string, 'done'>;
+  targets: Record<string, number>;
+  progress: Record<string, 'done'>;
 };
 
 export function createSyncState(): SyncState {
@@ -391,30 +394,62 @@ export function fingerprintMark(mark: NeodbShelfMark): string {
     .digest('hex');
 }
 
+/**
+ * 读取增量状态。
+ *
+ * 只接受当前版本：版本号不符、字段缺失或类型错的文件，一律**丢弃并告警**，
+ * 不做任何字段级兼容。丢弃的代价是这一轮按「没有历史」处理（条目会重算一次，
+ * 写入本身幂等），换来的是「状态文件只有一种形状」这一条硬约束。
+ */
 export function loadSyncState(path: string): SyncState {
   if (!existsSync(path)) {
     return createSyncState();
   }
+
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<SyncStateFile> & {
-      marks?: Record<string, string>;
-    };
-    // v1 文件只有 marks；缺失的 targets / progress 一律视为空，旧文件可直接用。
-    return {
-      marks: parsed.marks ?? {},
-      targets: parsed.targets ?? {},
-      progress: parsed.progress ?? {},
-    };
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    consola.warn(`增量状态文件损坏，按空状态处理: ${path}`);
+    consola.warn(`增量状态文件不是合法 JSON，按空状态处理: ${path}`);
     return createSyncState();
   }
+
+  if (!isSyncStateFile(parsed)) {
+    consola.warn(
+      `增量状态文件格式不符（要求 version=${STATE_VERSION}，且 marks/targets/progress 类型正确），按空状态处理: ${path}`,
+    );
+    return createSyncState();
+  }
+
+  return {
+    marks: parsed.marks,
+    targets: parsed.targets,
+    progress: parsed.progress,
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isSyncStateFile(value: unknown): value is SyncStateFile {
+  if (!isPlainObject(value)) return false;
+  if (value.version !== STATE_VERSION) return false;
+  const { marks, targets, progress } = value;
+  if (!isPlainObject(marks) || !isPlainObject(targets) || !isPlainObject(progress)) {
+    return false;
+  }
+  return (
+    Object.values(marks).every((hash) => typeof hash === 'string') &&
+    Object.values(targets).every((id) => typeof id === 'number') &&
+    Object.values(progress).every((mark) => mark === 'done')
+  );
 }
 
 export function saveSyncState(path: string, state: SyncState): void {
   mkdirSync(dirname(path), { recursive: true });
   const doc: SyncStateFile = {
-    version: 2,
+    version: STATE_VERSION,
     updatedAt: new Date().toISOString(),
     marks: state.marks,
     targets: state.targets,
@@ -431,32 +466,59 @@ export function saveSyncState(path: string, state: SyncState): void {
 /** 书架 → 下一页页码。 */
 export type FullSyncCursor = Record<string, number>;
 
+/** 游标文件的唯一版本号。读到别的版本直接从头开始，不做迁移。 */
+const CURSOR_VERSION = 1;
+
+type FullSyncCursorFile = {
+  version: typeof CURSOR_VERSION;
+  updatedAt: string;
+  pages: FullSyncCursor;
+};
+
+/**
+ * 读取全量游标。与状态文件同一条规则：只认当前版本与完整形状，
+ * 否则按「从头开始」处理（最坏结果只是重复处理一页，写入幂等）。
+ */
 export function loadFullSyncCursor(path: string): FullSyncCursor {
   if (!existsSync(path)) {
     return {};
   }
+
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
-      pages?: FullSyncCursor;
-    };
-    return parsed.pages ?? {};
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    consola.warn(`全量游标文件损坏，按从头开始处理: ${path}`);
+    consola.warn(`全量游标文件不是合法 JSON，按从头开始处理: ${path}`);
     return {};
   }
+
+  if (!isCursorFile(parsed)) {
+    consola.warn(
+      `全量游标文件格式不符（要求 version=${CURSOR_VERSION} 且 pages 为页码对象），按从头开始处理: ${path}`,
+    );
+    return {};
+  }
+
+  return parsed.pages;
+}
+
+function isCursorFile(value: unknown): value is FullSyncCursorFile {
+  if (!isPlainObject(value)) return false;
+  if (value.version !== CURSOR_VERSION) return false;
+  if (!isPlainObject(value.pages)) return false;
+  return Object.values(value.pages).every(
+    (page) => typeof page === 'number' && Number.isInteger(page) && page >= 1,
+  );
 }
 
 export function saveFullSyncCursor(path: string, cursor: FullSyncCursor): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(
-    path,
-    JSON.stringify(
-      { version: 1, updatedAt: new Date().toISOString(), pages: cursor },
-      null,
-      2,
-    ),
-    'utf8',
-  );
+  const doc: FullSyncCursorFile = {
+    version: CURSOR_VERSION,
+    updatedAt: new Date().toISOString(),
+    pages: cursor,
+  };
+  writeFileSync(path, JSON.stringify(doc, null, 2), 'utf8');
 }
 
 /** 允许 category 判断的辅助（供测试复用）。 */

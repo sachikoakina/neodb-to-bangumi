@@ -53,7 +53,6 @@ export type NeodbShelfMark = {
   comment_text?: string;
   /** 0 = 未评分，2 = 一星 … 10 = 五星（即 0–10 分制）。 */
   rating_grade?: number;
-  tags?: string[];
 };
 
 /** GET /api/me/shelf/{type} 的响应。 */
@@ -112,7 +111,6 @@ export type BangumiCollection = {
   rate: number;
   type: BangumiCollectionType;
   comment?: string | null;
-  tags?: string[];
   ep_status?: number;
   vol_status?: number;
   updated_at: string;

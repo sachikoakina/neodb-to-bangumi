@@ -23,10 +23,9 @@ describe('增量状态 v2', () => {
     }
   });
 
-  it('能读 v1 旧文件：只有 marks 时不报错，其余字段补空', () => {
+  it('旧版本文件被拒绝：不做任何字段级兼容', () => {
     const { dir, path } = tempStatePath('state-v1-');
     try {
-      // 手工造一份 v1 文件（只有 marks），验证不依赖 saveSyncState 的迁移逻辑。
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(
         path,
@@ -37,10 +36,50 @@ describe('增量状态 v2', () => {
         }),
         'utf8',
       );
-      const state = loadSyncState(path);
-      expect(state.marks).toEqual({ 'uuid-a': 'sha1aaa' });
-      expect(state.targets).toEqual({});
-      expect(state.progress).toEqual({});
+      expect(loadSyncState(path)).toEqual(createSyncState());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('版本号缺失或字段缺失 → 空状态', () => {
+    const { dir, path } = tempStatePath('state-shape-');
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      const cases = [
+        { updatedAt: 'x', marks: {}, targets: {}, progress: {} },
+        { version: 2, updatedAt: 'x', marks: {}, targets: {} },
+        { version: 2, updatedAt: 'x', marks: {}, progress: {} },
+      ];
+      for (const doc of cases) {
+        writeFileSync(path, JSON.stringify(doc), 'utf8');
+        expect(loadSyncState(path)).toEqual(createSyncState());
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('字段类型不对 → 空状态（不做宽容解析）', () => {
+    const { dir, path } = tempStatePath('state-type-');
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      const cases = [
+        { version: 2, updatedAt: 'x', marks: { a: 1 }, targets: {}, progress: {} },
+        { version: 2, updatedAt: 'x', marks: {}, targets: { a: '1' }, progress: {} },
+        {
+          version: 2,
+          updatedAt: 'x',
+          marks: {},
+          targets: {},
+          progress: { a: 'pending' },
+        },
+        { version: 2, updatedAt: 'x', marks: [], targets: {}, progress: {} },
+      ];
+      for (const doc of cases) {
+        writeFileSync(path, JSON.stringify(doc), 'utf8');
+        expect(loadSyncState(path)).toEqual(createSyncState());
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
