@@ -134,3 +134,33 @@ export type ReadResult<T> =
   | { status: 'found'; value: T }
   | { status: 'absent' }
   | { status: 'error'; scope: 'auth' | 'item'; message: string };
+
+/**
+ * 写入失败的三种归因 —— 决定调用方能不能继续。
+ *
+ * `auth`（401/403）：凭据失效，必须中止整轮；
+ * `not-found`（404）：服务端拒绝为该目标建收藏（条目合并/锁定/不可收藏），
+ *   重试无意义，转待核对让人处理；
+ * `transient`（5xx/超时/其余）：可以下一轮再试，记 failed 但保留可重跑语义。
+ */
+export type WriteFailureKind = 'auth' | 'not-found' | 'transient';
+
+/** 写入结果。失败时携带状态码与归一化短消息，供审计与摘要复用。 */
+export type WriteResult =
+  | { ok: true }
+  | {
+      ok: false;
+      kind: WriteFailureKind;
+      /** HTTP 状态码；无响应（超时 / DNS）为 null。 */
+      status: number | null;
+      /** 归一化短消息：`collection 123 returned 404: Not Found: <body>`。 */
+      message: string;
+    };
+
+/**
+ * 缓存里的增量状态被丢弃的原因 —— 非 null 表示本轮是「按空状态运行」。
+ *
+ * 不把「文件不存在」算进来：首次运行本来就没有状态，那是正常起点而不是重置。
+ */
+export type SyncStateDiscardReason =
+  'invalid-json' | 'version-mismatch' | 'shape-mismatch';
