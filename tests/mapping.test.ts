@@ -22,9 +22,16 @@ describe('状态映射', () => {
     expect(mapShelfType('dropped', 4, 'off').kind).toBe('skip-on-hold');
   });
 
-  it('no-downgrade 保护「看过」不被降级，guard=off 不保护', () => {
-    expect(mapShelfType('wishlist', 2, 'no-downgrade').kind).toBe('no-downgrade');
-    expect(mapShelfType('progress', 2, 'no-downgrade').kind).toBe('no-downgrade');
+  it('no-downgrade 只把状态固定为「看过」，guard=off 不保护', () => {
+    // 带 type 是刻意的：调用方要继续合并评分/短评，必须拿到「最终状态」而不是跳过信号。
+    expect(mapShelfType('wishlist', 2, 'no-downgrade')).toEqual({
+      kind: 'no-downgrade',
+      type: 2,
+    });
+    expect(mapShelfType('progress', 2, 'no-downgrade')).toEqual({
+      kind: 'no-downgrade',
+      type: 2,
+    });
     expect(mapShelfType('wishlist', 2, 'off')).toEqual({ kind: 'map', type: 1 });
     expect(mapShelfType('complete', 2, 'no-downgrade')).toEqual({
       kind: 'map',

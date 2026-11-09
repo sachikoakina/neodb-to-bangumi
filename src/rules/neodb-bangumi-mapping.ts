@@ -37,7 +37,7 @@ export const NEODB_SHELF_TO_BANGUMI_TYPE: Record<string, BangumiCollectionType> 
 export type StatusMappingResult =
   | { kind: 'map'; type: BangumiCollectionType }
   | { kind: 'skip-on-hold' }
-  | { kind: 'no-downgrade' }
+  | { kind: 'no-downgrade'; type: BangumiCollectionType }
   | { kind: 'unknown-shelf-type' };
 
 /**
@@ -45,7 +45,8 @@ export type StatusMappingResult =
  *
  * 1. 未知 shelf_type → `unknown-shelf-type`（失败在关闭一侧）；
  * 2. 目标已是搁置（4）→ `skip-on-hold`，NeoDB 无法表达搁置意图；
- * 3. `no-downgrade` 且目标为看过（2）、来源想看/在看 → `no-downgrade`；
+ * 3. `no-downgrade` 且目标为看过（2）、来源想看/在看 → 状态固定为看过（2），
+ *    调用方继续合并评分/短评/隐私 —— 守卫只保护状态字段；
  * 4. 其余正常映射。
  */
 export function mapShelfType(
@@ -65,7 +66,7 @@ export function mapShelfType(
     existingType === 2 &&
     (mapped === 1 || mapped === 3)
   ) {
-    return { kind: 'no-downgrade' };
+    return { kind: 'no-downgrade', type: 2 };
   }
   return { kind: 'map', type: mapped };
 }

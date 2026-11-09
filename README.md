@@ -75,16 +75,16 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 
 #### 3. 字段合并与保护（8 项）
 
-| 名称                         | 数据类型 | 默认值           | 用途                                                                                   |
-| ---------------------------- | -------- | ---------------- | -------------------------------------------------------------------------------------- |
-| `SYNC_NEODB_BANGUMI_RATING`  | enum     | `bangumi_prefer` | 评分合并：`bangumi_prefer` 保留目标非 0 分；`overwrite` 用 NeoDB 分覆盖                |
-| `SYNC_NEODB_BANGUMI_COMMENT` | enum     | `bangumi_prefer` | 短评合并：`bangumi_prefer` 保留目标非空短评；`overwrite` 用 NeoDB 短评覆盖（空值清空） |
-| `SYNC_STATUS_GUARD`          | enum     | `off`            | `no-downgrade` 时现有「看过」不被想看/在看降级                                         |
-| `SYNC_BANGUMI_PRIVATE_MODE`  | enum     | `target`         | `target` 统一写配置值；`source` 逐条跟随 NeoDB（2→私密，0/1→公开），源缺失保留现值     |
-| `SYNC_BANGUMI_PRIVATE`       | boolean  | `false`          | `target` 模式的 private 值；`source` 模式在源缺失且无目标值时的兜底                    |
-| `SYNC_PROGRESS`              | boolean  | `0`              | 进度拉满总开关；`1` 时 complete 条目书籍章节/卷数、电影首集、TV/动画/真人分集拉到上限  |
-| `SYNC_INCLUDE_SP`            | boolean  | `0`              | 分集拉满是否纳入 SP；电影永不处理 SP                                                   |
-| `SYNC_INCLUDE_OP_ED`         | boolean  | `0`              | 是否把 OP/ED（type 2/3）纳入拉满；默认关闭，电影永不处理                               |
+| 名称                         | 数据类型 | 默认值           | 用途                                                                                                                                          |
+| ---------------------------- | -------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SYNC_NEODB_BANGUMI_RATING`  | enum     | `bangumi_prefer` | 评分合并：`bangumi_prefer` 保留目标非 0 分；`overwrite` 用 NeoDB 分覆盖                                                                       |
+| `SYNC_NEODB_BANGUMI_COMMENT` | enum     | `bangumi_prefer` | 短评合并：`bangumi_prefer` 保留目标非空短评；`overwrite` 用 NeoDB 短评覆盖（空值清空）                                                        |
+| `SYNC_STATUS_GUARD`          | enum     | `off`            | `no-downgrade` 只固定「看过」状态；评分/短评/隐私照常合并（不整条跳过）                                                                       |
+| `SYNC_BANGUMI_PRIVATE_MODE`  | enum     | `target`         | `target` 统一写配置值；`source` 逐条跟随 NeoDB（2→私密，0/1→公开），源缺失保留现值                                                            |
+| `SYNC_BANGUMI_PRIVATE`       | boolean  | `false`          | `target` 模式的 private 值；`source` 模式在源缺失且无目标值时的兜底                                                                           |
+| `SYNC_PROGRESS`              | boolean  | `0`              | 进度拉满总开关；`1` 时 complete 条目书籍章节/卷数、电影首集、TV/动画/真人分集拉到上限（收藏字段无变化时仍检查分集；失败记 failed 且下轮重试） |
+| `SYNC_INCLUDE_SP`            | boolean  | `0`              | 分集拉满是否纳入 SP；电影永不处理 SP                                                                                                          |
+| `SYNC_INCLUDE_OP_ED`         | boolean  | `0`              | 是否把 OP/ED（type 2/3）纳入拉满；默认关闭，电影永不处理                                                                                      |
 
 #### 4. 运行模式（3 项）
 

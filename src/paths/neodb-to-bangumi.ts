@@ -52,6 +52,7 @@ import {
   planBangumiPrivate,
 } from '../rules/neodb-bangumi-mapping';
 import { planBookProgress, planEpisodeProgress } from '../rules/bangumi-progress';
+import { decideWriteOutcome, type ProgressSignal } from '../rules/write-decision';
 import {
   shelfStatusRank,
   shouldSkipClaim,
@@ -250,7 +251,9 @@ export default async function runNeodbToBangumi(
           report.scanned += 1;
           budgetUsed += 1;
 
-          let outcome: ItemOutcome;
+          // 单条未预期异常不能葬送整轮：认证失败才中止，其余记 failed 后继续，
+          // 保证审计 / 报告 / 摘要仍能落盘。
+          let outcome: ItemOutcome = 'failed';
           try {
             outcome = await processMark(mark, ctx);
           } catch (error) {
@@ -258,7 +261,17 @@ export default async function runNeodbToBangumi(
               ctx.aborted = true;
               return false;
             }
-            throw error;
+            const detail = error instanceof Error ? error.message : String(error);
+            ctx.matchAudit.push({
+              ...createAuditEntry(mark),
+              outcome: 'failed',
+              reason: 'item-threw',
+              error: truncateError(detail),
+            });
+            consola.error(
+              `条目处理异常，继续下一条: ${mark.item.display_title || mark.item.title || mark.item.uuid} —`,
+              detail,
+            );
           } finally {
             // 每条目结束后统一节流：一次处理会扇出搜索、读收藏、分集等多个请求。
             await bangumiThrottle();
@@ -336,25 +349,13 @@ async function processMark(
   const fingerprint = fingerprintMark(mark);
 
   // 匹配审计：每条处理的条目记录匹配对象、证据与结局，运行结束统一落盘。
-  const audit: MatchAuditEntry = {
-    uuid: item.uuid,
-    label,
-    category: String(item.category),
-    shelf: String(mark.shelf_type),
-    via: null,
-    subjectId: null,
-    subjectName: null,
-    sourceYear: null,
-    sourceMediaForm: null,
-    candidateYear: null,
-    candidateMediaForm: null,
-    candidates: null,
-    strictHold: false,
-    outcome: 'skipped',
-    reason: null,
-  };
-  const finish = (outcome: ItemOutcome, reason: string | null = null): ItemOutcome => {
-    ctx.matchAudit.push({ ...audit, outcome, reason });
+  const audit = createAuditEntry(mark);
+  const finish = (
+    outcome: ItemOutcome,
+    reason: string | null = null,
+    error: string | null = null,
+  ): ItemOutcome => {
+    ctx.matchAudit.push({ ...audit, outcome, reason, error });
     return outcome;
   };
 
@@ -430,7 +431,7 @@ async function processMark(
   // ── 读取目标收藏：error 绝不当作 absent ──
   const existingRes = await getBangumiCollection(ctx.username, subjectId);
   if (existingRes.status === 'error') {
-    return finish('failed', 'target-read-failed');
+    return finish('failed', 'target-read-failed', existingRes.message);
   }
   const existing = existingRes.status === 'found' ? existingRes.value : null;
 
@@ -449,8 +450,11 @@ async function processMark(
     return finish('skipped', 'hold-protected');
   }
   if (status.kind === 'no-downgrade') {
-    consola.info(`状态保护：Bangumi 已「看过」，不降级为想看/在看: ${label}`);
-    return finish('skipped', 'no-downgrade-protected');
+    // 守卫只固定状态字段：评分/短评/隐私仍按各自开关合并。整条跳过会让一次状态
+    // 冲突连带丢弃新来源上的评分/短评修正。
+    consola.info(
+      `状态保护：Bangumi 已「看过」，保持状态；评分/短评/隐私照常合并: ${label}`,
+    );
   }
 
   // 只有真正进入写入判定的标记才占位。
@@ -500,7 +504,11 @@ async function processMark(
   ) {
     const subjectRes = await getBangumiSubject(subjectId);
     if (subjectRes.status !== 'found') {
-      return finish('failed', 'subject-read-failed');
+      return finish(
+        'failed',
+        'subject-read-failed',
+        subjectRes.status === 'error' ? subjectRes.message : 'subject 不存在',
+      );
     }
     const plan = planBookProgress(
       existing ?? { ep_status: 0, vol_status: 0 },
@@ -513,20 +521,30 @@ async function processMark(
     }
   }
 
-  if (!differs && epStatus == null && volStatus == null) {
-    rememberState(ctx, item.uuid, fingerprint);
-    return finish('unchanged');
-  }
+  const bookProgressPending = epStatus != null || volStatus != null;
+  // 分集进度是独立信号：收藏字段完整不代表分集点满，因此不能挂在 differs 上。
+  const episodesApplicable =
+    config.sync.progress &&
+    mark.shelf_type === 'complete' &&
+    (item.category === 'movie' || item.category === 'tv');
 
   const reasons = [
     statusDiffers ? 'status' : null,
     rateDiffers ? 'rating' : null,
     commentDiffers ? 'comment' : null,
     privateDiffers ? 'private' : null,
-    epStatus != null || volStatus != null ? 'progress' : null,
+    bookProgressPending ? 'progress' : null,
   ].filter((reason): reason is string => reason != null);
 
   if (config.sync.dryRun) {
+    if (!differs && !bookProgressPending) {
+      if (episodesApplicable) {
+        consola.info(
+          `[dry-run] 收藏字段无变化；分集完整性不在 dry-run 校验（正式运行才读取）: ${label}`,
+        );
+      }
+      return finish('unchanged');
+    }
     const extras = [
       epStatus != null ? ` ep_status=${epStatus}` : '',
       volStatus != null ? ` vol_status=${volStatus}` : '',
@@ -541,41 +559,68 @@ async function processMark(
     return finish('written', `plan:${reasons.join('+')}`);
   }
 
-  const ok = await upsertBangumiCollection(subjectId, {
-    type: status.type,
-    rate,
-    comment,
-    private: privatePlan.private,
-    ...(epStatus != null ? { ep_status: epStatus } : {}),
-    ...(volStatus != null ? { vol_status: volStatus } : {}),
-  });
-  if (!ok) {
-    return finish('failed', 'collection-write-failed');
+  // ── 收藏 upsert：只在字段有差异或书籍进度待写时发送 ──
+  const needsCollectionWrite = differs || bookProgressPending;
+  if (needsCollectionWrite) {
+    const ok = await upsertBangumiCollection(subjectId, {
+      type: status.type,
+      rate,
+      comment,
+      private: privatePlan.private,
+      ...(epStatus != null ? { ep_status: epStatus } : {}),
+      ...(volStatus != null ? { vol_status: volStatus } : {}),
+    });
+    if (!ok) {
+      return finish('failed', 'collection-write-failed');
+    }
+    consola.info(
+      `写入 Bangumi: subject/${subjectId} reasons=${reasons.join('+')} ` +
+        `type=${status.type} rate=${rate} private=${privatePlan.private}` +
+        `${epStatus != null ? ` ep_status=${epStatus}` : ''}` +
+        `${volStatus != null ? ` vol_status=${volStatus}` : ''}（${label}）`,
+    );
+  } else if (episodesApplicable) {
+    consola.info(`收藏字段无变化，仅检查分集: subject/${subjectId}（${label}）`);
   }
 
-  consola.info(
-    `写入 Bangumi: subject/${subjectId} reasons=${reasons.join('+')} ` +
-      `type=${status.type} rate=${rate} private=${privatePlan.private}` +
-      `${epStatus != null ? ` ep_status=${epStatus}` : ''}` +
-      `${volStatus != null ? ` vol_status=${volStatus}` : ''}（${label}）`,
-  );
-
   // ── 分集拉满（complete 且 movie/tv；音乐/游戏无进度字段）──
-  if (
-    config.sync.progress &&
-    mark.shelf_type === 'complete' &&
-    (item.category === 'movie' || item.category === 'tv')
-  ) {
-    await fillEpisodeProgress(
-      subjectId,
-      item.category === 'movie',
-      config.sync.includeSp,
-      config.sync.includeOpEd,
+  let progress: ProgressSignal = { kind: 'not-applicable' };
+  if (episodesApplicable) {
+    progress = toProgressSignal(
+      await fillEpisodeProgress(
+        subjectId,
+        item.category === 'movie',
+        config.sync.includeSp,
+        config.sync.includeOpEd,
+      ),
     );
   }
 
+  const decision = decideWriteOutcome({
+    differs,
+    bookProgress: bookProgressPending,
+    progress,
+  });
+
+  if (decision.outcome === 'failed') {
+    // 分集失败必须清掉指纹：指纹只覆盖收藏字段，留着会让下一轮增量直接跳过，
+    // 把「没点满的分集」永久锁死。
+    forgetState(ctx, item.uuid);
+    const message = progress.kind === 'failed' ? progress.message : null;
+    consola.error(
+      `写入未完成: subject/${subjectId} reason=${decision.reason ?? 'unknown'}` +
+        `${message ? ` ${message}` : ''}（${label}）`,
+    );
+    return finish('failed', decision.reason, message);
+  }
+
   rememberState(ctx, item.uuid, fingerprint);
-  return finish('written', reasons.join('+'));
+  return finish(
+    decision.outcome,
+    decision.outcome === 'written'
+      ? (decision.reason ?? (reasons.join('+') || 'progress'))
+      : null,
+  );
 }
 
 function rememberState(ctx: SyncContext, uuid: string, fingerprint: string): void {
@@ -584,6 +629,66 @@ function rememberState(ctx: SyncContext, uuid: string, fingerprint: string): voi
   }
   ctx.state[uuid] = fingerprint;
   ctx.stateDirty = true;
+}
+
+/**
+ * 清掉某条目的增量指纹，让下一轮重新处理。
+ *
+ * 只在分集失败时使用：指纹只覆盖收藏字段（状态/评分/短评/隐私），不含分集；
+ * 若留着旧指纹，下一轮会把这条当成「已同步」直接跳过，失败的分集永远补不上。
+ */
+function forgetState(ctx: SyncContext, uuid: string): void {
+  if (ctx.config.sync.dryRun) {
+    return;
+  }
+  if (!(uuid in ctx.state)) {
+    return;
+  }
+  delete ctx.state[uuid];
+  ctx.stateDirty = true;
+}
+
+/** 审计条目工厂：失败路径（异常隔离）也要能产出同样形状的记录。 */
+function createAuditEntry(mark: NeodbShelfMark): MatchAuditEntry {
+  const item = mark.item;
+  return {
+    uuid: item.uuid,
+    label: item.display_title || item.title || item.uuid,
+    category: String(item.category),
+    shelf: String(mark.shelf_type),
+    via: null,
+    subjectId: null,
+    subjectName: null,
+    sourceYear: null,
+    sourceMediaForm: null,
+    candidateYear: null,
+    candidateMediaForm: null,
+    candidates: null,
+    strictHold: false,
+    outcome: 'skipped',
+    reason: null,
+    error: null,
+  };
+}
+
+/** 审计里的错误文本只留首行与有限长度，避免把整包响应塞进产物。 */
+function truncateError(message: string): string {
+  const firstLine = message.split('\n')[0] ?? '';
+  return firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+}
+
+/** 分集执行结果 → 三路信号之一。 */
+function toProgressSignal(result: EpisodeProgressResult): ProgressSignal {
+  switch (result.kind) {
+    case 'written':
+      return { kind: 'written', added: result.added };
+    case 'unchanged':
+      return { kind: 'unchanged' };
+    case 'not-applicable':
+      return { kind: 'not-applicable' };
+    case 'failed':
+      return { kind: 'failed', reason: result.reason, message: result.message };
+  }
 }
 
 function recordUnmatched(
@@ -808,24 +913,86 @@ async function resolveItemYear(
 // 分集拉满
 // ─────────────────────────────────────────────────────────────────────────
 
+/** 分集进度失败原因：读取与写入分开，便于审计定位。 */
+export type EpisodeProgressFailureReason =
+  'episodes-read-failed' | 'episode-states-read-failed' | 'episode-write-failed';
+
+export type EpisodeProgressResult =
+  | { kind: 'written'; added: number; failed: number }
+  | { kind: 'unchanged' }
+  | { kind: 'not-applicable'; reason: 'no-episodes' | 'not-collected' }
+  | { kind: 'failed'; reason: EpisodeProgressFailureReason; message: string };
+
+/** 可注入的读取/写入依赖，便于离线断言失败路径。 */
+export type EpisodeProgressDeps = {
+  getEpisodes: typeof getBangumiEpisodes;
+  getStates: typeof getBangumiEpisodeStates;
+  markWatched: typeof markBangumiEpisodeWatched;
+};
+
+const defaultEpisodeProgressDeps: EpisodeProgressDeps = {
+  getEpisodes: getBangumiEpisodes,
+  getStates: getBangumiEpisodeStates,
+  markWatched: markBangumiEpisodeWatched,
+};
+
 /**
  * 把 complete 条目的分集推进到上限。
  * 以分集实际 type=2 为准：已看过的集不发请求，第二轮运行零请求（幂等）。
  * 电影只补第一个正片；无正片则仅收藏本身。OP/ED 需显式开启且电影永不处理。
+ *
+ * 返回值必须携带结果：收藏字段写入与分集写入是两件事。读取/写入失败不能
+ * 静默吞掉（否则摘要显示成功、实际一集没点），也不能让条目被增量指纹锁死。
+ * 认证类失败继续抛 {@link AuthAbortError}，由外层中止整轮。
  */
-async function fillEpisodeProgress(
+export async function fillEpisodeProgress(
   subjectId: number,
   isMovie: boolean,
   includeSp: boolean,
   includeOpEd: boolean,
-): Promise<void> {
-  const episodesRes = await getBangumiEpisodes(subjectId);
-  if (episodesRes.status !== 'found') {
-    return;
+  deps: Partial<EpisodeProgressDeps> = {},
+): Promise<EpisodeProgressResult> {
+  const { getEpisodes, getStates, markWatched } = {
+    ...defaultEpisodeProgressDeps,
+    ...deps,
+  };
+
+  const episodesRes = await getEpisodes(subjectId);
+  if (episodesRes.status === 'error') {
+    if (episodesRes.scope === 'auth') {
+      throw new AuthAbortError(episodesRes.message);
+    }
+    return {
+      kind: 'failed',
+      reason: 'episodes-read-failed',
+      message: episodesRes.message,
+    };
   }
-  const statesRes = await getBangumiEpisodeStates(subjectId);
-  if (statesRes.status !== 'found') {
-    return;
+  if (episodesRes.status === 'absent') {
+    return {
+      kind: 'failed',
+      reason: 'episodes-read-failed',
+      message: `subject ${subjectId} 分集列表不可用`,
+    };
+  }
+
+  const statesRes = await getStates(subjectId);
+  if (statesRes.status === 'error') {
+    if (statesRes.scope === 'auth') {
+      throw new AuthAbortError(statesRes.message);
+    }
+    return {
+      kind: 'failed',
+      reason: 'episode-states-read-failed',
+      message: statesRes.message,
+    };
+  }
+  if (statesRes.status === 'absent') {
+    return {
+      kind: 'failed',
+      reason: 'episode-states-read-failed',
+      message: `subject ${subjectId} 分集状态不可用`,
+    };
   }
 
   const plan = planEpisodeProgress(episodesRes.value, statesRes.value, {
@@ -834,21 +1001,24 @@ async function fillEpisodeProgress(
     includeOpEd,
     collected: true,
   });
+  if (plan.reason === 'not-collected') {
+    return { kind: 'not-applicable', reason: 'not-collected' };
+  }
   if (plan.reason === 'no-episodes') {
     consola.info(`分集进度：无正片，跳过 subject/${subjectId}`);
-    return;
+    return { kind: 'not-applicable', reason: 'no-episodes' };
   }
   if (plan.missing.length === 0) {
     consola.info(
       `分集进度：无缺失集 subject/${subjectId} target=${plan.target.length}`,
     );
-    return;
+    return { kind: 'unchanged' };
   }
 
   let added = 0;
   let failed = 0;
   for (const episodeId of plan.missing) {
-    if (await markBangumiEpisodeWatched(subjectId, episodeId)) {
+    if (await markWatched(subjectId, episodeId)) {
       added += 1;
     } else {
       failed += 1;
@@ -859,4 +1029,14 @@ async function fillEpisodeProgress(
       `target=${plan.target.length} missing=${plan.missing.length} ` +
       `added=${added} failed=${failed}`,
   );
+
+  if (failed > 0) {
+    // 已成功的集不回滚：下一轮 planEpisodeProgress 的 missing 只剩失败集，天然重试。
+    return {
+      kind: 'failed',
+      reason: 'episode-write-failed',
+      message: `${failed}/${plan.missing.length} 集写入失败`,
+    };
+  }
+  return { kind: 'written', added, failed };
 }

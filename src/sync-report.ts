@@ -181,6 +181,11 @@ export type MatchAuditEntry = {
   strictHold: boolean;
   outcome: Outcome;
   reason: string | null;
+  /**
+   * 失败时的归一化短消息（首行、≤200 字）。
+   * 控制台日志会随运行滚走，产物需要能独立回答「为什么失败」。
+   */
+  error?: string | null;
 };
 
 export type MatchAuditMeta = {

@@ -37,9 +37,11 @@ check('目标搁置(4)跳过-dropped', mapShelfType('dropped', 4, 'off'), {
 });
 check('no-downgrade: 看过不被想看降级', mapShelfType('wishlist', 2, 'no-downgrade'), {
   kind: 'no-downgrade',
+  type: 2,
 });
 check('no-downgrade: 看过不被在看降级', mapShelfType('progress', 2, 'no-downgrade'), {
   kind: 'no-downgrade',
+  type: 2,
 });
 check('no-downgrade: 看过→看过正常', mapShelfType('complete', 2, 'no-downgrade'), {
   kind: 'map',
