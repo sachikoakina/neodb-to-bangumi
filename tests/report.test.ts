@@ -9,6 +9,7 @@ import {
   dryRunUnmatchedPath,
   pruneUnmatched,
   record,
+  renderFailureAnnotations,
   renderSummaryMarkdown,
   saveMatchAudit,
   upsertUnmatched,
@@ -152,26 +153,53 @@ describe('摘要渲染', () => {
     expect(md).toContain('dry-run（written 为计划，未提交）');
     expect(md).toContain('全量');
     expect(md).toContain('未遍历完整');
-    expect(md).toContain('待核对名单条目数：3');
+    expect(md).toContain('## 待核对名单（3 条）');
+    expect(md).toContain('本轮无待核对条目。');
   });
 
-  it('按原因渲染待核对分布', () => {
+  it('接入待核对清单：分组标题、条目行与 subject 后缀', () => {
     const md = renderSummaryMarkdown(createReport(), {
-      startedAt: '2026-11-05T00:00:00Z',
-      finishedAt: '2026-11-05T00:01:00Z',
+      startedAt: '2026-11-09T15:58:24Z',
+      finishedAt: '2026-11-09T16:06:16Z',
       dryRun: false,
       fullSync: false,
       shelves: ['complete'],
       truncatedShelves: [],
-      unmatchedCount: 5,
-      unmatchedByReason: {
-        'no-bangumi-match': 3,
-        'ambiguous-bangumi-match': 2,
-      },
+      unmatchedCount: 2,
+      unmatchedEntries: [
+        {
+          source: 'neodb-bangumi',
+          reason: 'no-bangumi-match',
+          title: '海底两万里',
+          itemUrl: 'https://neodb.social/book/1',
+          category: 'book',
+          shelf: 'progress',
+          firstSeenAt: '2026-11-04T16:06:16Z',
+          lastSeenAt: '2026-11-09T16:06:16Z',
+        },
+        {
+          source: 'neodb-bangumi',
+          reason: 'duplicate-target',
+          title: '是，大臣 第二季',
+          itemUrl: 'https://neodb.social/tv/2',
+          category: 'tv',
+          shelf: 'complete',
+          state: 'skipped',
+          subjectId: 16260,
+          firstSeenAt: '2026-11-09T16:06:16Z',
+          lastSeenAt: '2026-11-09T16:06:16Z',
+        },
+      ],
+      unmatchedStats: { total: 2, added: 0, removed: 0, observed: 2, notScanned: 0 },
     });
-    expect(md).toContain('| 待核对原因 | 条目数 |');
-    expect(md).toContain('| no-bangumi-match | 3 |');
-    expect(md).toContain('| ambiguous-bangumi-match | 2 |');
+    expect(md).toContain('## 待核对名单（2 条）');
+    expect(md).toContain('### NeoDB → Bangumi（2）');
+    expect(md).toContain('#### unresolved（1）');
+    expect(md).toContain('#### skipped（1）');
+    expect(md).toContain(
+      ' 1. 海底两万里 — https://neodb.social/book/1 · no-bangumi-match · 已存在 5 天',
+    );
+    expect(md).toContain('duplicate-target(subject/16260)');
   });
 
   it('不传 metrics 时不出现阶段耗时表（保持旧输出）', () => {
@@ -345,5 +373,93 @@ describe('dry-run 待核对路径派生', () => {
     expect(dryRunUnmatchedPath('.cache/unmatched')).toBe(
       '.cache/unmatched-dryrun.json',
     );
+  });
+});
+
+describe('失败条目并入清单', () => {
+  const baseCtx = {
+    startedAt: '2026-11-09T15:58:24Z',
+    finishedAt: '2026-11-09T16:06:16Z',
+    dryRun: false,
+    fullSync: false,
+    shelves: ['complete'] as const,
+    truncatedShelves: [],
+    unmatchedCount: 0,
+  };
+
+  function auditEntry(partial: Partial<MatchAuditEntry> = {}): MatchAuditEntry {
+    return {
+      uuid: 'uuid-1',
+      label: '欢迎来龙餐馆',
+      category: 'movie',
+      shelf: 'complete',
+      via: 'title',
+      subjectId: 695934,
+      subjectName: '欢迎来龙餐馆',
+      sourceYear: 2026,
+      sourceMediaForm: 'movie',
+      candidateYear: 2026,
+      candidateMediaForm: 'movie',
+      candidates: [695934],
+      strictHold: false,
+      outcome: 'failed',
+      reason: null,
+      ...partial,
+    };
+  }
+
+  it('失败条目并入清单的 failed 分组，不再单列表格', () => {
+    const md = renderSummaryMarkdown(createReport(), {
+      ...baseCtx,
+      shelves: [...baseCtx.shelves],
+      unmatchedCount: 1,
+      unmatchedEntries: [
+        {
+          source: 'neodb-bangumi',
+          reason: 'collection-write-failed',
+          title: '欢迎来龙餐馆',
+          itemUrl: 'https://neodb.social/movie/x',
+          category: 'movie',
+          shelf: 'complete',
+          state: 'failed',
+          subjectId: 695934,
+          firstSeenAt: '2026-11-09T16:06:16Z',
+          lastSeenAt: '2026-11-09T16:06:16Z',
+        },
+      ],
+      unmatchedStats: { total: 1, added: 1, removed: 0, observed: 0, notScanned: 0 },
+    });
+    expect(md).not.toContain('需要人工处理的条目');
+    expect(md).toContain('#### failed（1）');
+    expect(md).toContain('collection-write-failed(subject/695934)');
+    expect(md).toContain('已存在 0 天');
+  });
+
+  it('缓存状态被丢弃时摘要标出「按空状态运行」', () => {
+    const md = renderSummaryMarkdown(createReport(), {
+      ...baseCtx,
+      shelves: [...baseCtx.shelves],
+      stateReset: 'version-mismatch',
+    });
+    expect(md).toContain('缓存被丢弃（version-mismatch）');
+    expect(md).toContain('按空状态运行');
+  });
+
+  it('注解为单行，并转义 % 与换行', () => {
+    const [line] = renderFailureAnnotations([
+      auditEntry({
+        reason: 'collection-not-found',
+        error: 'collection 695934 returned 404\n第二行 100%',
+      }),
+    ]);
+    expect(line!.startsWith('::warning title=collection-not-found::')).toBe(true);
+    expect(line).not.toContain('\n');
+    expect(line).toContain('%0A');
+    expect(line).toContain('100%25');
+    expect(line).toContain('subject/695934');
+  });
+
+  it('没有问题时注解为空数组', () => {
+    expect(renderFailureAnnotations([])).toEqual([]);
   });
 });

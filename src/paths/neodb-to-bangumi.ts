@@ -75,7 +75,7 @@ import {
   createSyncState,
   fingerprintMark,
   loadFullSyncCursor,
-  loadSyncState,
+  loadSyncStateWithStatus,
   saveFullSyncCursor,
   saveSyncState,
   type FullSyncCursor,
@@ -92,14 +92,21 @@ import {
   upsertUnmatched,
   type MatchAuditEntry,
   type PathReport,
+  type UnmatchedEntry,
   type UnmatchedMap,
 } from '../sync-report';
+import {
+  summarizeUnmatchedRun,
+  zeroUnmatchedStats,
+  type UnmatchedRunStats,
+} from '../unmatched-report';
 import type {
   BangumiSubject,
   NeodbItem,
   NeodbShelfMark,
   ReadResult,
   ShelfType,
+  SyncStateDiscardReason,
 } from '../types';
 
 type ItemOutcome = 'written' | 'unchanged' | 'skipped' | 'unresolved' | 'failed';
@@ -131,6 +138,15 @@ type SyncContext = {
   stopReason: StopReason;
   /** 匹配审计：按处理顺序累积，运行结束统一落盘（含 dry-run）。 */
   matchAudit: MatchAuditEntry[];
+  /**
+   * 本轮真正进入遍历的条目 uuid（含被增量跳过的）。
+   *
+   * 只有靠它才能区分「名单里没解决」与「本轮压根没扫到」——后者是配额/页数
+   * 截断的产物，不该被读成新缺口。
+   */
+  seenUuids: Set<string>;
+  /** 本轮因成功导入而从名单移出的条数。 */
+  removedBySuccess: number;
 };
 
 type MatchResult =
@@ -169,6 +185,12 @@ export type SyncRunResult = {
   metrics: RunMetricsSnapshot;
   /** 提前停止的原因（条目配额 / 时间预算）；未触发为 null。 */
   stopReason: StopReason;
+  /** 非 null 表示缓存状态被丢弃、本轮按空状态运行；用于在摘要里说明。 */
+  stateReset: SyncStateDiscardReason | null;
+  /** 本轮与待核对名单有关的计数（新增/移除/观察中/未扫描）。 */
+  unmatchedStats: UnmatchedRunStats;
+  /** 本轮首次进入名单的条目（「本轮新增」小节用）。 */
+  unmatchedAdded: UnmatchedEntry[];
 };
 
 export default async function runNeodbToBangumi(
@@ -178,6 +200,8 @@ export default async function runNeodbToBangumi(
   resetMetrics();
   const report = createReport();
   const unmatched = loadUnmatched(config.sync.unmatchedLog);
+  // 运行前的名单键：结束时的差集就是「本轮新增」，比在每个 upsert 处记账更不易漏。
+  const initialUnmatchedKeys = new Set(unmatched.keys());
   const truncatedShelves: ShelfType[] = [];
 
   // ── 凭据探测：认证失败中止链路，不带病运行 ──
@@ -191,6 +215,9 @@ export default async function runNeodbToBangumi(
       matchAudit: [],
       metrics: metricsSnapshot(),
       stopReason: null,
+      stateReset: null,
+      unmatchedStats: zeroUnmatchedStats(),
+      unmatchedAdded: [],
     };
   }
   if (!bangumiToken) {
@@ -203,6 +230,9 @@ export default async function runNeodbToBangumi(
       matchAudit: [],
       metrics: metricsSnapshot(),
       stopReason: null,
+      stateReset: null,
+      unmatchedStats: zeroUnmatchedStats(),
+      unmatchedAdded: [],
     };
   }
   const me = await getBangumiMe();
@@ -216,13 +246,24 @@ export default async function runNeodbToBangumi(
       matchAudit: [],
       metrics: metricsSnapshot(),
       stopReason: null,
+      stateReset: null,
+      unmatchedStats: zeroUnmatchedStats(),
+      unmatchedAdded: [],
     };
   }
 
-  const state: SyncState =
+  const stateLoad =
     config.sync.incremental && !config.sync.fullSync
-      ? loadSyncState(config.sync.stateFile)
-      : createSyncState();
+      ? loadSyncStateWithStatus(config.sync.stateFile)
+      : { state: createSyncState(), discarded: null };
+  const state: SyncState = stateLoad.state;
+  if (stateLoad.discarded) {
+    // 丢弃是设计内的，但必须显式说明：否则读者会把「多扫一轮」误读成增量正常。
+    consola.warn(
+      `本轮按空状态运行（${stateLoad.discarded}）：缓存里的增量状态已被丢弃，` +
+        '已同步条目会重算；写入幂等，代价是多扫一轮。',
+    );
+  }
   const ctx: SyncContext = {
     config,
     username: me.username,
@@ -235,6 +276,8 @@ export default async function runNeodbToBangumi(
     aborted: false,
     stopReason: null,
     matchAudit: [],
+    seenUuids: new Set(),
+    removedBySuccess: 0,
   };
 
   // 全量游标：只有正式的全量运行读写它；dry-run 不推进。
@@ -271,6 +314,9 @@ export default async function runNeodbToBangumi(
         );
 
         for (const mark of ordered) {
+          // 见过集合必须在所有分支之前记账（含增量跳过）：名单里「本轮没扫到」
+          // 与「扫到了没解决」是两件事，配额截断不该被读成新缺口。
+          ctx.seenUuids.add(mark.item.uuid);
           // 增量跳过在配额判断之前：已同步条目既不计扫描配额，也不消耗条目预算。
           // 判定交给纯函数：除指纹外还要看「进度是否已拉满」——否则打开
           // SYNC_PROGRESS 后，历史上已记指纹的条目永远轮不到补分集。
@@ -350,6 +396,15 @@ export default async function runNeodbToBangumi(
           }
           addItemTime(performance.now() - itemStartedAt);
           record(report, outcome);
+          // 已导入的条目当轮即移出名单：清单只列未导入项，不靠 30 天老化兜底。
+          // dry-run 的 written 只是计划，不能据此改写正式名单的视角。
+          if (
+            !config.sync.dryRun &&
+            (outcome === 'written' || outcome === 'unchanged') &&
+            ctx.unmatched.delete(mark.item.uuid)
+          ) {
+            ctx.removedBySuccess += 1;
+          }
         }
         return true;
       },
@@ -380,9 +435,11 @@ export default async function runNeodbToBangumi(
     }
   }
 
+  let prunedRemoved = 0;
   if (!config.sync.dryRun) {
     // 清理必须发生在所有 upsert 之后：否则会把本轮刚刷新过 lastSeenAt 的条目误删。
     const pruned = pruneUnmatched(unmatched, config.sync.reviewStateMaxAgeDays);
+    prunedRemoved = pruned.removed;
     if (pruned.removed > 0) {
       unmatched.clear();
       for (const [key, value] of pruned.entries) {
@@ -399,6 +456,14 @@ export default async function runNeodbToBangumi(
     saveUnmatched(dryRunPath, unmatched);
     consola.info(`dry-run 待核对名单（本轮视角）已写入: ${dryRunPath}`);
   }
+
+  const unmatchedSummary = summarizeUnmatchedRun({
+    unmatched,
+    initialKeys: initialUnmatchedKeys,
+    seenUuids: ctx.seenUuids,
+    removedBySuccess: ctx.removedBySuccess,
+    prunedRemoved,
+  });
   return {
     aborted: ctx.aborted ? 'bangumi-auth' : false,
     report,
@@ -406,7 +471,10 @@ export default async function runNeodbToBangumi(
     truncatedShelves,
     matchAudit: ctx.matchAudit,
     metrics: metricsSnapshot(),
+    stateReset: stateLoad.discarded,
     stopReason: ctx.stopReason,
+    unmatchedStats: unmatchedSummary.stats,
+    unmatchedAdded: unmatchedSummary.added,
   };
 }
 

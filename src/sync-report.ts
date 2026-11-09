@@ -10,8 +10,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { consola } from 'consola';
 import type { RunMetricsSnapshot, StageName } from './metrics';
+import { renderUnmatchedSection, type UnmatchedRunStats } from './unmatched-report';
 import type { StopReason } from './rules/budget';
-import type { ShelfType } from './types';
+import type { ShelfType, SyncStateDiscardReason } from './types';
 
 export type Outcome = 'written' | 'unchanged' | 'skipped' | 'unresolved' | 'failed';
 
@@ -277,9 +278,19 @@ export type SummaryContext = {
   fullSync: boolean;
   shelves: ShelfType[];
   truncatedShelves: ShelfType[];
+  /** 名单合计；不传 `unmatchedStats` 时的兜底。 */
   unmatchedCount: number;
-  /** 待核对原因分布：直接告诉读者该补外链还是该重跑。 */
-  unmatchedByReason?: Record<string, number>;
+  /**
+   * 待核对名单全量条目（未导入项）。渲染由 `unmatched-report.ts` 负责：
+   * 按链路→状态→分类→书架四级分组逐条列出。
+   */
+  unmatchedEntries?: readonly UnmatchedEntry[];
+  /** 本轮新增/移除/观察中/未扫描的计数。 */
+  unmatchedStats?: UnmatchedRunStats;
+  /** 本轮首次进入名单的条目（「本轮新增」小节）。 */
+  unmatchedAdded?: readonly UnmatchedEntry[];
+  /** 「已存在 N 天」的参照时刻；不传则用 `finishedAt`。 */
+  runNow?: Date;
   /**
    * 可选：阶段耗时与请求等待快照。
    * 不传时摘要里不出现「耗时」小节，其余区块照常渲染。
@@ -287,6 +298,11 @@ export type SummaryContext = {
   metrics?: RunMetricsSnapshot;
   /** 提前停止原因：条目配额或时间预算；未触发为 null/undefined。 */
   stopReason?: StopReason;
+  /**
+   * 缓存状态被丢弃的原因。非 null 表示本轮按空状态运行 —— 不标出来的话，
+   * 读者会把「多扫了一轮」误读成增量正常。
+   */
+  stateReset?: SyncStateDiscardReason | null;
 };
 
 export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): string {
@@ -298,6 +314,12 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
     `- 模式：${ctx.dryRun ? 'dry-run（written 为计划，未提交）' : '正式写入'}｜${ctx.fullSync ? '全量' : '常规'}`,
   );
   lines.push(`- 书架：${ctx.shelves.join(', ')}`);
+  if (ctx.stateReset) {
+    lines.push(
+      `- 增量状态：缓存被丢弃（${ctx.stateReset}），本轮按空状态运行；` +
+        '写入本身幂等，代价是多扫一轮。',
+    );
+  }
   if (ctx.stopReason === 'time-budget') {
     lines.push('- 本轮提前收尾：时间预算用尽（已处理条目的状态已落盘，下一轮继续）');
   } else if (ctx.stopReason === 'max-items') {
@@ -315,23 +337,49 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
     `| ${report.scanned} | ${report.written} | ${report.unchanged} | ${report.skipped} | ${report.unresolved} | ${report.failed} |`,
   );
   lines.push('');
-  if (ctx.metrics) {
-    lines.push(...renderMetricsSection(ctx.metrics));
-    lines.push('');
-  }
-  lines.push(`待核对名单条目数：${ctx.unmatchedCount}`);
-  const reasons = Object.entries(ctx.unmatchedByReason ?? {}).sort(
-    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  // 待核对清单是这份报告的主内容，排在耗时统计之前：读者先看「哪些没导进去」。
+  lines.push(
+    ...renderUnmatchedSection(ctx.unmatchedEntries ?? [], {
+      startedAt: ctx.startedAt,
+      now: ctx.runNow ?? new Date(ctx.finishedAt),
+      stats: ctx.unmatchedStats ?? {
+        total: ctx.unmatchedCount,
+        added: 0,
+        removed: 0,
+        observed: ctx.unmatchedCount,
+        notScanned: 0,
+      },
+      addedEntries: ctx.unmatchedAdded ?? [],
+      truncatedShelves: ctx.truncatedShelves,
+    }),
   );
-  if (reasons.length) {
+  if (ctx.metrics) {
     lines.push('');
-    lines.push('| 待核对原因 | 条目数 |');
-    lines.push('| --- | ---: |');
-    for (const [reason, count] of reasons) {
-      lines.push(`| ${reason} | ${count} |`);
-    }
+    lines.push(...renderMetricsSection(ctx.metrics));
   }
   return lines.join('\n');
+}
+
+/**
+ * 把问题条目渲染成 Actions 注解（`::warning title=...::text`）。
+ *
+ * 目的是让 Actions 页面的运行摘要、以及仓库的 Annotations 面板直接列出
+ * 「哪一条、哪个 subject、为什么」——不必下载 artifact 才知道发生了什么。
+ * workflow command 要求单行，因此换行与 `%` 必须转义，否则解析会失败。
+ */
+export function renderFailureAnnotations(entries: MatchAuditEntry[]): string[] {
+  return entries.map((entry) => {
+    const where = entry.subjectId == null ? '' : ` subject/${entry.subjectId}`;
+    const detail = entry.error == null ? '' : ` — ${entry.error}`;
+    return (
+      `::warning title=${escapeWorkflowCommand(entry.reason ?? 'failed')}::` +
+      escapeWorkflowCommand(`${entry.label}${where}${detail}`)
+    );
+  });
+}
+
+function escapeWorkflowCommand(text: string): string {
+  return text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 }
 
 const STAGE_LABELS: Record<StageName, string> = {

@@ -13,6 +13,7 @@ import runNeodbToBangumi from './paths/neodb-to-bangumi';
 import {
   assertReportInvariant,
   buildMatchAuditDocument,
+  renderFailureAnnotations,
   renderSummaryMarkdown,
   saveMatchAudit,
 } from './sync-report';
@@ -84,10 +85,10 @@ async function main(): Promise<void> {
     consola.warn(`以下书架未遍历完整: ${truncatedShelves.join(', ')}`);
   }
 
-  const unmatchedByReason: Record<string, number> = {};
-  for (const entry of result.unmatched.values()) {
-    unmatchedByReason[entry.reason] = (unmatchedByReason[entry.reason] ?? 0) + 1;
-  }
+  // 需要人看的条目：真失败，加上「目标不可收藏」这类重试也不会自愈的缺口。
+  const problemEntries = result.matchAudit.filter(
+    (entry) => entry.outcome === 'failed' || entry.reason === 'collection-not-found',
+  );
 
   const summary = renderSummaryMarkdown(report, {
     startedAt,
@@ -97,9 +98,13 @@ async function main(): Promise<void> {
     shelves: config.sync.shelfTypes,
     truncatedShelves,
     unmatchedCount: result.unmatched.size,
-    unmatchedByReason,
+    unmatchedEntries: [...result.unmatched.values()],
+    unmatchedStats: result.unmatchedStats,
+    unmatchedAdded: result.unmatchedAdded,
+    runNow: new Date(finishedAt),
     metrics: result.metrics,
     stopReason: result.stopReason,
+    stateReset: result.stateReset,
   });
 
   mkdirSync(dirname(config.sync.reportFile), { recursive: true });
@@ -120,6 +125,11 @@ async function main(): Promise<void> {
   );
   writeFileSync(config.sync.summaryFile, summary, 'utf8');
   consola.info(`报告已写入: ${config.sync.reportFile} / ${config.sync.summaryFile}`);
+
+  // Actions 注解：把「哪一条、哪个 subject、为什么」直接摆在运行页面上。
+  for (const line of renderFailureAnnotations(problemEntries)) {
+    consola.log(line);
+  }
 
   const exitCode = decideExitCode({
     aborted: false,

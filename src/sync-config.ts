@@ -9,7 +9,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import dotenv from 'dotenv';
 import { consola } from 'consola';
-import { SHELF_TYPES, type NeodbShelfMark, type ShelfType } from './types';
+import {
+  SHELF_TYPES,
+  type NeodbShelfMark,
+  type ShelfType,
+  type SyncStateDiscardReason,
+} from './types';
 import type {
   BangumiPrivateMode,
   CommentMergeProfile,
@@ -412,9 +417,25 @@ export function fingerprintMark(mark: NeodbShelfMark): string {
  * 不做任何字段级兼容。丢弃的代价是这一轮按「没有历史」处理（条目会重算一次，
  * 写入本身幂等），换来的是「状态文件只有一种形状」这一条硬约束。
  */
+/** 状态载入结果：状态本体 + 缓存被丢弃的原因（null = 正常）。 */
+export type SyncStateLoad = {
+  state: SyncState;
+  discarded: SyncStateDiscardReason | null;
+};
+
 export function loadSyncState(path: string): SyncState {
+  return loadSyncStateWithStatus(path).state;
+}
+
+/**
+ * 带原因的状态载入：除了状态本身，还告诉调用方「是否丢弃了缓存」。
+ *
+ * 丢弃本身是设计内的（宁可多扫一轮，也不要维护两套形状），但必须可见 ——
+ * 否则日志里一句 warn 很容易被当成噪音，读者会误以为增量在正常工作。
+ */
+export function loadSyncStateWithStatus(path: string): SyncStateLoad {
   if (!existsSync(path)) {
-    return createSyncState();
+    return { state: createSyncState(), discarded: null };
   }
 
   let parsed: unknown;
@@ -422,21 +443,29 @@ export function loadSyncState(path: string): SyncState {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
     consola.warn(`增量状态文件不是合法 JSON，按空状态处理: ${path}`);
-    return createSyncState();
+    return { state: createSyncState(), discarded: 'invalid-json' };
   }
 
   if (!isSyncStateFile(parsed)) {
+    const discarded = isVersionMismatch(parsed) ? 'version-mismatch' : 'shape-mismatch';
     consola.warn(
       `增量状态文件格式不符（要求 version=${STATE_VERSION}，且 marks/targets/progress 类型正确），按空状态处理: ${path}`,
     );
-    return createSyncState();
+    return { state: createSyncState(), discarded };
   }
 
   return {
-    marks: parsed.marks,
-    targets: parsed.targets,
-    progress: parsed.progress,
+    state: {
+      marks: parsed.marks,
+      targets: parsed.targets,
+      progress: parsed.progress,
+    },
+    discarded: null,
   };
+}
+
+function isVersionMismatch(value: unknown): boolean {
+  return isPlainObject(value) && 'version' in value && value.version !== STATE_VERSION;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

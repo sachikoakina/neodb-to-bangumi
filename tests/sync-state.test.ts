@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createSyncState, loadSyncState, saveSyncState } from '../src/sync-config';
+import {
+  createSyncState,
+  loadSyncState,
+  loadSyncStateWithStatus,
+  saveSyncState,
+} from '../src/sync-config';
 
 function tempStatePath(prefix: string): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -147,5 +152,73 @@ describe('增量状态 v2', () => {
     const b = createSyncState();
     a.marks.x = 'h';
     expect(b.marks).toEqual({});
+  });
+});
+
+describe('状态载入的原因（本轮是否按空状态运行）', () => {
+  it('文件不存在 → discarded 为 null：首次运行不是重置', () => {
+    const { dir, path } = tempStatePath('state-status-empty-');
+    try {
+      expect(loadSyncStateWithStatus(path)).toEqual({
+        state: createSyncState(),
+        discarded: null,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('版本不符 → version-mismatch', () => {
+    const { dir, path } = tempStatePath('state-status-version-');
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify({ version: 1, marks: {} }), 'utf8');
+      const loaded = loadSyncStateWithStatus(path);
+      expect(loaded.discarded).toBe('version-mismatch');
+      expect(loaded.state).toEqual(createSyncState());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('版本正确但形状不符 → shape-mismatch', () => {
+    const { dir, path } = tempStatePath('state-status-shape-');
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(
+        path,
+        JSON.stringify({ version: 2, updatedAt: 'x', marks: {} }),
+        'utf8',
+      );
+      expect(loadSyncStateWithStatus(path).discarded).toBe('shape-mismatch');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('非法 JSON → invalid-json', () => {
+    const { dir, path } = tempStatePath('state-status-broken-');
+    try {
+      saveSyncState(path, createSyncState());
+      writeFileSync(path, '{ not json', 'utf8');
+      expect(loadSyncStateWithStatus(path).discarded).toBe('invalid-json');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('合法文件 → discarded 为 null，状态原样返回', () => {
+    const { dir, path } = tempStatePath('state-status-ok-');
+    try {
+      const state = {
+        marks: { a: 'h1' },
+        targets: { a: 1 },
+        progress: { a: 'done' as const },
+      };
+      saveSyncState(path, state);
+      expect(loadSyncStateWithStatus(path)).toEqual({ state, discarded: null });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

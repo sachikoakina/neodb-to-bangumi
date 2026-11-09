@@ -107,7 +107,7 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 | `SYNC_MATCH_AUDIT_FILE`     | path     | `.cache/match-audit.json`      | 匹配审计：每条目的匹配方式/候选/证据/结局（dry-run 也产出），错配复核与清理清单的依据                           |
 | `REVIEW_STATE_MAX_AGE_DAYS` | number   | `30`                           | 名单按 `lastSeenAt` 老化的天数；`0` 永不清理；不按「本轮未出现」淘汰                                            |
 | `SYNC_REPORT_FILE`          | path     | `.cache/sync-report.json`      | 机器可读运行报告                                                                                                |
-| `SYNC_SUMMARY_FILE`         | path     | `.cache/sync-summary.md`       | Markdown 运行摘要（含待核对原因分布）                                                                           |
+| `SYNC_SUMMARY_FILE`         | path     | `.cache/sync-summary.md`       | Markdown 运行摘要（含待核对清单：按 链路/状态/分类/书架 分组逐条列出）                                          |
 | `FULL_SYNC_CURSOR_FILE`     | path     | `.cache/full-sync-cursor.json` | 仅 `FULL_SYNC=1` 使用的分页游标；常规运行不读不写，空页自动清除该书架                                           |
 | `SYNC_UNMATCHED_RETRY_DAYS` | number   | `7`                            | 未匹配条目退避上限天数：按 1/2/4/7 天递增跳过网络请求，但仍留在待核对名单；`0` = 不避让。已补外链的条目永不退避 |
 
@@ -165,9 +165,11 @@ npm run cleanup -- audit/cleanup-list.txt --apply --set-type 1   # 同时把收�
 
 ## 运行结果
 
-每轮输出统一 `PathReport`（满足 `scanned = written + unchanged + skipped + unresolved + failed`）、Markdown 摘要与机器可读 JSON。`failed` 条目使退出码为 1，认证中止为 2。
+每轮输出统一 `PathReport`（满足 `scanned = written + unchanged + skipped + unresolved + failed`）、Markdown 摘要与机器可读 JSON。退出码按严重程度分级：认证中止为 2、报告恒等式破坏为 1；`failed` 条目默认**不再**判红（改为 `::warning` 注解 + 摘要里的 `failed` 分组），需要「有失败即红」时置 `SYNC_FAIL_ON_ITEM_ERRORS=1`。
 
-`failed` 与 `unresolved` 刻意分开：搜索请求失败、年份读取失败、目标写入失败都是 `failed`，下一轮会重试；只有「搜索过但没有可信候选」才是 `unresolved`（数据缺口，需要人工补外链或补条目）。
+摘要的主体是**待核对清单**：先给名单总数、本轮运行时刻（UTC 与上海时间）、新增/移除/观察中，再按「链路 → 状态 → 分类 → 书架」四级分组逐条列出未导入条目，每条统一为 `序号. 标题 — 链接 · 原因 · 已存在 N 天`，组标题后带条目数。只列未导入项：成功写入或确认无变化的条目在当轮即从名单移出（dry-run 除外，它只写派生名单）。清单末尾另附两段覆盖度说明——本轮没进扫描集合的条数（配额截断/分页上限/链路未运行，已保留、不计缺席），以及书架未遍历完整导致无法归属到具体条目的情况（无此情况则省略）。
+
+`failed` 与 `unresolved` 刻意分开：搜索请求失败、年份读取失败、目标写入失败（5xx/超时）都是 `failed`，下一轮会重试；只有「搜索过但没有可信候选」才是 `unresolved`（数据缺口，需要人工补外链或补条目）。写入被服务端以 404 拒绝（条目合并/锁定/不可收藏）同样记 `unresolved` 的 `collection-not-found`——重试无法自愈，转待核对让人处理。
 
 ## 已知限制
 
@@ -175,6 +177,7 @@ npm run cleanup -- audit/cleanup-list.txt --apply --set-type 1   # 同时把收�
 - **真人影视匹配率**：Bangumi 对动画/书籍/游戏/音乐覆盖好，真人电影/电视剧覆盖弱，无外链的条目可能大量 unresolved——在 NeoDB 条目上补 Bangumi 外链后重跑即可命中；
 - **同名歧义**：多个精确同名候选且年份/媒体形态无法区分时，本轮不会写入，记 `ambiguous-bangumi-match`；这是刻意不猜，补外链即可解决；
 - `podcast` / `performance` 分类在 Bangumi 无对应类型，写入侧跳过；
+- **建收藏被 404 拒绝**：Bangumi 偶有对「存在但不可收藏」的条目（被合并、锁定、服务端限制）拒绝 `POST /v0/users/-/collections/{id}`。这类条目记 `collection-not-found` 并进待核对名单，不会每轮重复判红；确认后可人工处理或加忽略；
 - **首次开启进度拉满会回填一次**：历史条目此前被记成「已同步」，开启后会重新检查分集（但不再需要 `FULL_SYNC`）。用 `SYNC_MAX_EPISODES_PER_ITEM` 与 `SYNC_TIME_BUDGET_MS` 分多轮推进即可。
 
 ## 开发校验
