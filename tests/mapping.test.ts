@@ -66,14 +66,14 @@ describe('评分合并（0–10 同分制）', () => {
   });
 });
 
-describe('短评合并', () => {
-  it('bangumi_prefer 只填空', () => {
+describe('短评合并（纯文本透传）', () => {
+  it('bangumi_prefer 保留目标非空短评，只补空缺', () => {
     expect(mergeComment('新的', '旧的', 'bangumi_prefer')).toBe('旧的');
     expect(mergeComment('新的', '', 'bangumi_prefer')).toBe('新的');
     expect(mergeComment('', '旧的', 'bangumi_prefer')).toBe('旧的');
   });
 
-  it('overwrite 覆盖含清空', () => {
+  it('overwrite 始终用源短评，空值清空目标', () => {
     expect(mergeComment('新的', '旧的', 'overwrite')).toBe('新的');
     expect(mergeComment('', '旧的', 'overwrite')).toBe('');
   });

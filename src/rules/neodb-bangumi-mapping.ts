@@ -9,7 +9,7 @@ import type { BangumiCollectionType, BangumiSubjectType } from '../types';
 /** 评分合并策略：`bangumi_prefer` 保留目标非 0 分；`overwrite` 用 NeoDB 覆盖。 */
 export type RatingMergeProfile = 'bangumi_prefer' | 'overwrite';
 
-/** 短评合并策略：`bangumi_prefer` 只填空；`overwrite` 覆盖（含清空）。 */
+/** 短评合并策略：`bangumi_prefer` 保留目标非空短评；`overwrite` 用源短评覆盖（含清空）。 */
 export type CommentMergeProfile = 'bangumi_prefer' | 'overwrite';
 
 /** 状态保护：`no-downgrade` 时现有「看过」不被想看/在看降级。 */
@@ -119,10 +119,10 @@ export function mergeRating(
 }
 
 /**
- * 短评合并：
+ * 短评合并：NeoDB `comment_text` 与 Bangumi `comment` 均为纯文本，直接透传。
  *
- * - `bangumi_prefer`：目标已有非空短评 → 保留；目标为空 → 用源短评；源为空不清空。
- * - `overwrite`：始终用源短评，空值也会清空。
+ * - `bangumi_prefer`：目标已有非空短评 → 保留；目标为空（含仅空白）→ 用源短评；源为空不清空。
+ * - `overwrite`：始终用源短评（含空值），空值会把目标短评清空。
  */
 export function mergeComment(
   sourceComment: string | null | undefined,

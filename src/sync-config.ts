@@ -194,7 +194,9 @@ export type SyncConfig = {
     matchStrict: boolean;
     /** 匹配审计产物路径：每条目的匹配对象、证据与结局。 */
     matchAuditFile: string;
+    /** 评分合并策略：`bangumi_prefer` 保留目标非 0 分；`overwrite` 用 NeoDB 分覆盖。 */
     ratingProfile: RatingMergeProfile;
+    /** 短评合并策略：`bangumi_prefer` 保留目标非空短评；`overwrite` 用 NeoDB 短评覆盖（含清空）。 */
     commentProfile: CommentMergeProfile;
     statusGuard: StatusGuard;
     bangumiPrivateMode: BangumiPrivateMode;
@@ -307,7 +309,7 @@ export function describeSyncConfig(config: SyncConfig): string {
     `  书架: ${s.shelfTypes.join(',')}`,
     `  分类白名单: ${categories}`,
     `  dry-run: ${s.dryRun ? 1 : 0}｜全量: ${s.fullSync ? 1 : 0}｜条目上限: ${s.maxItems}`,
-    `  评分: ${s.ratingProfile}｜短评: ${s.commentProfile}｜状态保护: ${s.statusGuard}`,
+    `  评分合并: ${s.ratingProfile}｜短评合并: ${s.commentProfile}｜状态保护: ${s.statusGuard}`,
     `  隐私: ${s.bangumiPrivateMode}${s.bangumiPrivateMode === 'target' ? `（private=${s.bangumiPrivate}）` : ''}` +
       `｜进度拉满: ${s.progress ? 1 : 0}（SP: ${s.includeSp ? 1 : 0}，OP/ED: ${s.includeOpEd ? 1 : 0}）`,
     `  增量: ${s.incremental && !s.fullSync ? 1 : 0}｜状态文件: ${s.stateFile}`,

@@ -23,7 +23,7 @@
 | 字段 | 规则                                                                                                                                                                                                 |
 | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 评分 | NeoDB `rating_grade` 与 Bangumi `rate` 同为 0–10，**直接透传**。默认 `bangumi_prefer`：目标非 0 分保留、为 0 才填充、源无分不清空；`overwrite` 才覆盖。                                              |
-| 短评 | 默认 `bangumi_prefer` 只填空；`overwrite` 覆盖含清空。                                                                                                                                               |
+| 短评 | NeoDB `comment_text` 与 Bangumi `comment` 均为纯文本，**直接透传**。默认 `bangumi_prefer`：目标非空短评保留、为空（含仅空白）才填充、源为空不清空；`overwrite` 才覆盖（空值会清空目标）。            |
 | 隐私 | `SYNC_BANGUMI_PRIVATE_MODE=target`（默认）统一写 `SYNC_BANGUMI_PRIVATE`；`source` 逐条跟随 NeoDB：`visibility=2` → `private=true`，`0/1` → `false`，源缺失保留目标现值/配置兜底。隐私始终参与 diff。 |
 | 时间 | **无法迁移**：Bangumi API 不接受自定义收藏时间，服务端写 `updated_at`。`unchanged` 时不发请求，目标时间不变。                                                                                        |
 | 进度 | 见下节，`SYNC_PROGRESS=1` 才写。                                                                                                                                                                     |

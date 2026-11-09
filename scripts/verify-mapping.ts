@@ -71,11 +71,15 @@ check('prefer: 源无分不清空', mergeRating(null, 8, 'bangumi_prefer'), 8);
 check('prefer: 双方无分', mergeRating(null, 0, 'bangumi_prefer'), 0);
 check('overwrite: 源覆盖', mergeRating(6, 8, 'overwrite'), 6);
 
-// ── 短评合并 ──
-check('prefer: 目标非空保留', mergeComment('新的', '旧的', 'bangumi_prefer'), '旧的');
-check('prefer: 目标空用源填充', mergeComment('新的', '', 'bangumi_prefer'), '新的');
-check('prefer: 源空不清空', mergeComment('', '旧的', 'bangumi_prefer'), '旧的');
-check('overwrite: 源覆盖含清空', mergeComment('', '旧的', 'overwrite'), '');
+// ── 短评合并（纯文本透传）──
+check(
+  'prefer: 目标非空短评保留',
+  mergeComment('新的', '旧的', 'bangumi_prefer'),
+  '旧的',
+);
+check('prefer: 目标空短评用源填充', mergeComment('新的', '', 'bangumi_prefer'), '新的');
+check('prefer: 源空短评不清空', mergeComment('', '旧的', 'bangumi_prefer'), '旧的');
+check('overwrite: 源空短评清空目标', mergeComment('', '旧的', 'overwrite'), '');
 
 // ── 隐私：target / source 双模式 ──
 check(
