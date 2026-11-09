@@ -8,7 +8,8 @@
  * 契约：
  * - 目标读取失败（非 404）→ 该条 failed，绝不当作「未收藏」覆盖；
  * - 搜索失败 / 年份读取失败 → failed（可重跑），不伪装成 unresolved；
- * - 401/403 → 中止整条链路，不再继续写；
+ * - 401/403 → 中止整条链路，不再继续写（读与写同一处置）；
+ * - 写入 404 → unresolved + 待核对：服务端拒绝为该目标建收藏，重试无意义；
  * - 未匹配与歧义 → unresolved 并进待核对名单，不单独导致失败；
  * - 同一 Bangumi 目标被多条 NeoDB 标记命中时，只让最强认领者写入；
  * - dry-run 只输出计划，不代表已提交。
@@ -328,6 +329,13 @@ export default async function runNeodbToBangumi(
               reason: 'item-threw',
               error: truncateError(detail),
             });
+            recordUnmatched(
+              ctx,
+              mark,
+              'item-threw',
+              mark.item.display_title || mark.item.title || mark.item.uuid,
+              { state: 'failed' },
+            );
             consola.error(
               `条目处理异常，继续下一条: ${mark.item.display_title || mark.item.title || mark.item.uuid} —`,
               detail,
@@ -444,7 +452,12 @@ async function processMark(
     extractBangumiSubjectId(item.external_resources) == null
   ) {
     const entry = ctx.unmatched.get(item.uuid);
-    if (entry && !shouldRecheck(entry, new Date(), config.sync.unmatchedRetryDays)) {
+    // 失败条目只是记账，不进退避：把一次 5xx 推迟到下个窗口毫无意义。
+    if (
+      entry &&
+      entry.state !== 'failed' &&
+      !shouldRecheck(entry, new Date(), config.sync.unmatchedRetryDays)
+    ) {
       consola.info(
         `未匹配条目处于退避期，跳过网络匹配: uuid=${item.uuid} ` +
           `next=${entry.nextCheckAt ?? '未记录'}（${label}）`,
@@ -462,10 +475,12 @@ async function processMark(
     consola.warn(
       `匹配失败，记 failed（下轮可重试）: uuid=${item.uuid} ${match.reason} ${label}`,
     );
+    // 落名单只为了「已存在 N 天」：failed 状态会清掉退避，下轮照常重试。
+    recordUnmatched(ctx, mark, match.reason, label, { state: 'failed' });
     return finish('failed', match.reason);
   }
   if (match.kind === 'unresolved') {
-    recordUnmatched(ctx, mark, match.reason, label);
+    recordUnmatched(ctx, mark, match.reason, label, { state: 'unresolved' });
     consola.info(
       `未匹配 Bangumi 条目（${match.reason}），记入待核对: uuid=${item.uuid} ${label}`,
     );
@@ -502,6 +517,9 @@ async function processMark(
       category: item.category,
       shelf: String(mark.shelf_type),
       neodbUuid: item.uuid,
+      // 让位给更强认领者：列入清单但不带退避，本条目下轮仍会重新裁决。
+      state: 'skipped',
+      subjectId,
     });
     consola.info(
       `重复目标，保留更强认领: subject/${subjectId} ` +
@@ -516,6 +534,10 @@ async function processMark(
     getBangumiCollection(ctx.username, subjectId),
   );
   if (existingRes.status === 'error') {
+    recordUnmatched(ctx, mark, 'target-read-failed', label, {
+      state: 'failed',
+      subjectId,
+    });
     return finish('failed', 'target-read-failed', existingRes.message);
   }
   const existing = existingRes.status === 'found' ? existingRes.value : null;
@@ -591,6 +613,10 @@ async function processMark(
       readSubjectCached(subjectId, ctx.subjectCache),
     );
     if (subjectRes.status !== 'found') {
+      recordUnmatched(ctx, mark, 'subject-read-failed', label, {
+        state: 'failed',
+        subjectId,
+      });
       return finish(
         'failed',
         'subject-read-failed',
@@ -648,7 +674,7 @@ async function processMark(
   // ── 收藏 upsert：只在字段有差异或书籍进度待写时发送 ──
   const needsCollectionWrite = differs || bookProgressPending;
   if (needsCollectionWrite) {
-    const ok = await timeStage('write', () =>
+    const write = await timeStage('write', () =>
       upsertBangumiCollection(subjectId, {
         type: status.type,
         rate,
@@ -658,8 +684,34 @@ async function processMark(
         ...(volStatus != null ? { vol_status: volStatus } : {}),
       }),
     );
-    if (!ok) {
-      return finish('failed', 'collection-write-failed');
+    if (!write.ok) {
+      // 认证失效与读路径同一处置：中止整轮（退出码 2），不把剩余条目录成 failed。
+      if (write.kind === 'auth') {
+        throw new AuthAbortError('collection-write-auth');
+      }
+      // 404：服务端拒绝为该目标建收藏（条目合并 / 锁定 / 不可收藏）。重试无法
+      // 自愈，因此转待核对留人处理，且**不**判 failed —— 否则一条坏数据会让
+      // 每晚的定时任务固定变红，红灯彻底失去区分度。
+      if (write.kind === 'not-found') {
+        recordUnmatched(ctx, mark, 'collection-not-found', label, {
+          state: 'unresolved',
+          subjectId,
+        });
+        consola.warn(
+          `目标不可收藏，转待核对: subject/${subjectId} uuid=${item.uuid} ` +
+            `${write.message}（${label}）`,
+        );
+        return finish(
+          'unresolved',
+          'collection-not-found',
+          truncateError(write.message),
+        );
+      }
+      recordUnmatched(ctx, mark, 'collection-write-failed', label, {
+        state: 'failed',
+        subjectId,
+      });
+      return finish('failed', 'collection-write-failed', truncateError(write.message));
     }
     consola.info(
       `写入 Bangumi: subject/${subjectId} reasons=${reasons.join('+')} ` +
@@ -703,6 +755,10 @@ async function processMark(
       `写入未完成: subject/${subjectId} reason=${decision.reason ?? 'unknown'}` +
         `${message ? ` ${message}` : ''}（${label}）`,
     );
+    recordUnmatched(ctx, mark, decision.reason ?? 'collection-write-failed', label, {
+      state: 'failed',
+      subjectId,
+    });
     return finish('failed', decision.reason, message);
   }
 
@@ -830,6 +886,10 @@ function recordUnmatched(
   mark: NeodbShelfMark,
   reason: string,
   label: string,
+  options: {
+    state?: 'unresolved' | 'skipped' | 'failed';
+    subjectId?: number;
+  } = {},
 ): void {
   const previous = ctx.unmatched.get(mark.item.uuid);
   const attempts = (previous?.attempts ?? 0) + 1;
@@ -842,6 +902,8 @@ function recordUnmatched(
     shelf: String(mark.shelf_type),
     neodbUuid: mark.item.uuid,
     attempts,
+    ...(options.state != null ? { state: options.state } : {}),
+    ...(options.subjectId != null ? { subjectId: options.subjectId } : {}),
     ...(next ? { nextCheckAt: next } : {}),
   });
 }

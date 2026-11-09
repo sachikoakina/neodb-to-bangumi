@@ -60,6 +60,17 @@ export type UnmatchedEntry = {
   attempts?: number;
   /** 下次允许重新发起匹配的时间（ISO）；缺失表示立即可查。 */
   nextCheckAt?: string;
+  /**
+   * 条目当前状态。旧文件缺这个字段时按 reason 推导（见 `unmatched-report.ts`），
+   * 因此历史名单不需要迁移。
+   *
+   * - `unresolved`：数据缺口（搜不到、年份对不上、目标不可收藏）；
+   * - `skipped`：被规则让位（如同一目标被更强标记认领）；
+   * - `failed`：技术失败（5xx/超时），下轮重试，不受退避限制。
+   */
+  state?: 'unresolved' | 'skipped' | 'failed';
+  /** 已知的 Bangumi 目标（`duplicate-target` / `collection-not-found` 才有）。 */
+  subjectId?: number;
 };
 
 export type UnmatchedMap = Map<string, UnmatchedEntry>;
@@ -82,6 +93,10 @@ export function upsertUnmatched(
     attempts?: number;
     /** 下次允许复查时间；传入则覆盖旧值。 */
     nextCheckAt?: string;
+    /** 条目状态；传入则覆盖旧值。`failed` 会清掉残留的退避时间。 */
+    state?: 'unresolved' | 'skipped' | 'failed';
+    /** 已知的 Bangumi 目标；传入则覆盖旧值。 */
+    subjectId?: number;
     /**
      * 是否刷新 `lastSeenAt`，默认 true。
      * 退避期内不会走到这里；保留该开关是为了让「跳过网络但仍视为本轮见过」
@@ -97,10 +112,16 @@ export function upsertUnmatched(
     if (detail.refreshLastSeen !== false) {
       existing.lastSeenAt = now;
     }
+    if (detail.state != null) existing.state = detail.state;
+    if (detail.subjectId != null) existing.subjectId = detail.subjectId;
     if (detail.attempts != null) existing.attempts = detail.attempts;
     if (detail.nextCheckAt != null) existing.nextCheckAt = detail.nextCheckAt;
+    // 失败条目必须立刻可重试：残留的退避时间会把一次 5xx 推迟到下个窗口。
+    if (detail.state === 'failed') delete existing.nextCheckAt;
     return;
   }
+  // 失败条目不带退避：它属于「这轮没成功」，不是「这条数据有缺口」。
+  const nextCheckAt = detail.state === 'failed' ? undefined : detail.nextCheckAt;
   entries.set(key, {
     source: 'neodb-bangumi',
     reason: detail.reason,
@@ -110,7 +131,9 @@ export function upsertUnmatched(
     ...(detail.shelf ? { shelf: detail.shelf } : {}),
     ...(detail.neodbUuid ? { neodbUuid: detail.neodbUuid } : {}),
     ...(detail.attempts != null ? { attempts: detail.attempts } : {}),
-    ...(detail.nextCheckAt ? { nextCheckAt: detail.nextCheckAt } : {}),
+    ...(detail.state != null ? { state: detail.state } : {}),
+    ...(detail.subjectId != null ? { subjectId: detail.subjectId } : {}),
+    ...(nextCheckAt ? { nextCheckAt } : {}),
     firstSeenAt: now,
     lastSeenAt: now,
   });

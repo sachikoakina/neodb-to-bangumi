@@ -16,6 +16,7 @@ import {
   logUnauthorized,
 } from './bangumi-http';
 import { classifyReadFailure } from '../rules/read-result';
+import { classifyWriteFailure, summarizeErrorBody } from '../rules/write-result';
 import type {
   BangumiCollection,
   BangumiEpisode,
@@ -24,6 +25,7 @@ import type {
   BangumiSubjectType,
   BangumiUser,
   ReadResult,
+  WriteResult,
 } from '../types';
 
 /** GET /v0/me —— 当前账号；拿不到 username 就无法读收藏，因此失败返回 null。 */
@@ -140,6 +142,10 @@ export async function getBangumiCollection(
 /**
  * 新建或更新一条收藏（状态/评分/短评/可见性/书籍进度）。
  * 服务端把 `updated_at` 设为该次请求的处理时间；客户端无法指定时间。
+ *
+ * 返回判别联合而不是布尔：401/403、404 与 5xx 的处置完全不同（中止 / 转待核对 /
+ * 下轮重试），把三者压成 `false` 会让调用方只能一律判失败。
+ * 失败时也把状态码与响应体摘要带出去，日志里不再只剩一串 got 的 stack。
  */
 export async function upsertBangumiCollection(
   subjectId: number,
@@ -152,23 +158,39 @@ export async function upsertBangumiCollection(
     ep_status?: number;
     vol_status?: number;
   },
-): Promise<boolean> {
+): Promise<WriteResult> {
   if (!bangumiToken) {
-    return false;
+    return {
+      ok: false,
+      kind: 'auth',
+      status: null,
+      message: 'BANGUMI_ACCESS_TOKEN is not set',
+    };
   }
   try {
     await bangumiGot.post(`${BGM_API}/v0/users/-/collections/${subjectId}`, {
       headers: authHeaders(),
       json: payload,
     });
-    return true;
+    return { ok: true };
   } catch (error) {
-    if (isUnauthorized(error)) {
+    const status = error instanceof HTTPError ? error.response.statusCode : null;
+    const kind = classifyWriteFailure(status);
+    const detail = summarizeErrorBody(
+      error instanceof HTTPError ? error.response.body : null,
+    );
+    const message =
+      `collection ${subjectId} returned ${status ?? 'no response'}` +
+      (detail ? `: ${detail}` : '');
+    if (kind === 'auth') {
       logUnauthorized();
+    } else if (kind === 'not-found') {
+      // 404 不是「网络抖了」：服务端拒绝为该目标建收藏，重试只会每晚重演。
+      consola.warn(`写入 Bangumi 收藏 ${subjectId} 被拒绝（404）: ${message}`);
     } else {
       consola.error(`写入 Bangumi 收藏 ${subjectId} 失败: `, error);
     }
-    return false;
+    return { ok: false, kind, status, message };
   }
 }
 
