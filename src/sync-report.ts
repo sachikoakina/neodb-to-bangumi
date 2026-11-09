@@ -8,6 +8,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { consola } from 'consola';
+import type { RunMetricsSnapshot, StageName } from './metrics';
+import type { StopReason } from './rules/budget';
 import type { ShelfType } from './types';
 
 export type Outcome = 'written' | 'unchanged' | 'skipped' | 'unresolved' | 'failed';
@@ -54,6 +56,10 @@ export type UnmatchedEntry = {
   neodbUuid?: string;
   firstSeenAt: string;
   lastSeenAt: string;
+  /** 累计未命中次数，驱动退避阶梯（1/2/4/7 天）。 */
+  attempts?: number;
+  /** 下次允许重新发起匹配的时间（ISO）；缺失表示立即可查。 */
+  nextCheckAt?: string;
 };
 
 export type UnmatchedMap = Map<string, UnmatchedEntry>;
@@ -72,13 +78,27 @@ export function upsertUnmatched(
     category?: string;
     shelf?: string;
     neodbUuid?: string;
+    /** 累计尝试次数；传入则覆盖旧值。 */
+    attempts?: number;
+    /** 下次允许复查时间；传入则覆盖旧值。 */
+    nextCheckAt?: string;
+    /**
+     * 是否刷新 `lastSeenAt`，默认 true。
+     * 退避期内不会走到这里；保留该开关是为了让「跳过网络但仍视为本轮见过」
+     * 这类用法不必伪造一次 upsert。
+     */
+    refreshLastSeen?: boolean;
   },
 ): void {
   const now = new Date().toISOString();
   const existing = entries.get(key);
   if (existing) {
     existing.reason = detail.reason;
-    existing.lastSeenAt = now;
+    if (detail.refreshLastSeen !== false) {
+      existing.lastSeenAt = now;
+    }
+    if (detail.attempts != null) existing.attempts = detail.attempts;
+    if (detail.nextCheckAt != null) existing.nextCheckAt = detail.nextCheckAt;
     return;
   }
   entries.set(key, {
@@ -89,6 +109,8 @@ export function upsertUnmatched(
     ...(detail.category ? { category: detail.category } : {}),
     ...(detail.shelf ? { shelf: detail.shelf } : {}),
     ...(detail.neodbUuid ? { neodbUuid: detail.neodbUuid } : {}),
+    ...(detail.attempts != null ? { attempts: detail.attempts } : {}),
+    ...(detail.nextCheckAt ? { nextCheckAt: detail.nextCheckAt } : {}),
     firstSeenAt: now,
     lastSeenAt: now,
   });
@@ -234,6 +256,13 @@ export type SummaryContext = {
   unmatchedCount: number;
   /** 待核对原因分布：直接告诉读者该补外链还是该重跑。 */
   unmatchedByReason?: Record<string, number>;
+  /**
+   * 可选：阶段耗时与请求等待快照。
+   * 不传时摘要输出与旧版逐字节一致，保证既有调用点与断言不受影响。
+   */
+  metrics?: RunMetricsSnapshot;
+  /** 提前停止原因：条目配额或时间预算；未触发为 null/undefined。 */
+  stopReason?: StopReason;
 };
 
 export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): string {
@@ -245,6 +274,11 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
     `- 模式：${ctx.dryRun ? 'dry-run（written 为计划，未提交）' : '正式写入'}｜${ctx.fullSync ? '全量' : '常规'}`,
   );
   lines.push(`- 书架：${ctx.shelves.join(', ')}`);
+  if (ctx.stopReason === 'time-budget') {
+    lines.push('- 本轮提前收尾：时间预算用尽（已处理条目的状态已落盘，下一轮继续）');
+  } else if (ctx.stopReason === 'max-items') {
+    lines.push('- 本轮提前收尾：条目配额用尽（下一轮从新增条目继续）');
+  }
   if (ctx.truncatedShelves.length) {
     lines.push(
       `- ⚠️ 以下书架因错误或页数上限未遍历完整：${ctx.truncatedShelves.join(', ')}`,
@@ -257,6 +291,10 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
     `| ${report.scanned} | ${report.written} | ${report.unchanged} | ${report.skipped} | ${report.unresolved} | ${report.failed} |`,
   );
   lines.push('');
+  if (ctx.metrics) {
+    lines.push(...renderMetricsSection(ctx.metrics));
+    lines.push('');
+  }
   lines.push(`待核对名单条目数：${ctx.unmatchedCount}`);
   const reasons = Object.entries(ctx.unmatchedByReason ?? {}).sort(
     (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
@@ -270,4 +308,56 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
     }
   }
   return lines.join('\n');
+}
+
+const STAGE_LABELS: Record<StageName, string> = {
+  shelf: '书架分页',
+  match: '匹配（搜索/候选详情）',
+  read: '读目标收藏',
+  write: '写目标收藏',
+  episode: '分集读取与写入',
+};
+
+function formatDuration(ms: number): string {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.round(ms)}ms`;
+}
+
+function formatShare(partMs: number, totalMs: number): string {
+  if (totalMs <= 0) return '—';
+  return `${((partMs / totalMs) * 100).toFixed(1)}%`;
+}
+
+/**
+ * 阶段耗时表。各阶段刻意互不重叠（书架分页 / 条目内三段），
+ * 因此每一项都可以直接除以本轮墙钟得到占比。
+ */
+function renderMetricsSection(metrics: RunMetricsSnapshot): string[] {
+  const lines = [
+    '| 阶段 | 次数 | 总耗时 | 占墙钟 | p50 | p90 | 最大 |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+  ];
+  const stages: readonly StageName[] = ['shelf', 'match', 'read', 'write', 'episode'];
+  for (const stage of stages) {
+    const stat = metrics.stages[stage];
+    if (stat.count === 0) continue;
+    lines.push(
+      `| ${STAGE_LABELS[stage]} | ${stat.count} | ${formatDuration(stat.totalMs)} | ` +
+        `${formatShare(stat.totalMs, metrics.wallMs)} | ${formatDuration(stat.p50Ms)} | ` +
+        `${formatDuration(stat.p90Ms)} | ${formatDuration(stat.maxMs)} |`,
+    );
+  }
+  const items = metrics.items;
+  lines.push(
+    `| 条目墙钟 | ${items.count} | ${formatDuration(items.totalMs)} | ` +
+      `${formatShare(items.totalMs, metrics.wallMs)} | ${formatDuration(items.p50Ms)} | ` +
+      `${formatDuration(items.p90Ms)} | ${formatDuration(items.maxMs)} |`,
+  );
+  lines.push('');
+  lines.push(
+    `- 固定等待：Bangumi ${metrics.sleeps.bangumi} 次 / ${formatDuration(metrics.sleepMs.bangumi)}；` +
+      `NeoDB ${metrics.sleeps.neodb} 次 / ${formatDuration(metrics.sleepMs.neodb)}`,
+  );
+  lines.push(`- 本轮墙钟：${formatDuration(metrics.wallMs)}`);
+  return lines;
 }

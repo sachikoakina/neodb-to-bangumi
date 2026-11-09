@@ -74,6 +74,12 @@ jobs:
       SYNC_BANGUMI_PRIVATE_MODE: ${{ vars.SYNC_BANGUMI_PRIVATE_MODE || 'target' }}
       SYNC_BANGUMI_PRIVATE: ${{ vars.SYNC_BANGUMI_PRIVATE || 'false' }}
       SYNC_MAX_ITEMS: ${{ vars.SYNC_MAX_ITEMS || '50' }}
+      # 吞吐与预算：0 = 关闭。时间预算到点主动收尾，避免被 60 分钟超时杀掉。
+      SYNC_TIME_BUDGET_MS: ${{ vars.SYNC_TIME_BUDGET_MS || '0' }}
+      # 单条分集上限：0 = 不限；设小可让长番分多轮补齐。
+      SYNC_MAX_EPISODES_PER_ITEM: ${{ vars.SYNC_MAX_EPISODES_PER_ITEM || '0' }}
+      # 未匹配条目退避上限天数；0 = 每轮都重试。
+      SYNC_UNMATCHED_RETRY_DAYS: ${{ vars.SYNC_UNMATCHED_RETRY_DAYS || '7' }}
 
       # runner 是临时的，增量状态靠下方的 cache restore/save 跨运行保留；
       # 全量运行会忽略它，从头走一遍。

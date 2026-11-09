@@ -51,7 +51,7 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 
 **保密要求**：不要把 Secret 写进 README、提交历史、issue、截图或日志；项目运行日志不会打印令牌原值。`SYNC_UNMATCHED_LOG` 与报告只记录条目标题与链接，不含凭据。
 
-### 二、Variable（普通变量/非敏感配置，共 26 项）
+### 二、Variable（普通变量/非敏感配置，共 32 项）
 
 #### 1. 连接与节流（5 项）
 
@@ -73,7 +73,7 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 | `SYNC_YEAR_TOLERANCE_BOOK` | number   | `1`                                  | 书籍类（type 1）单独的年份容差；初版/再版年份口径差异大，可单独放宽                                                                              |
 | `SYNC_MATCH_STRICT`        | boolean  | `1`                                  | 匹配严格模式：唯一同名候选年份无法核对且形态不可判定时转待核对，不自动写入（宁可漏配，不可错配）；`0` = 证据缺失照写（旧行为）                   |
 
-#### 3. 字段合并与保护（8 项）
+#### 3. 字段合并与保护（9 项）
 
 | 名称                         | 数据类型 | 默认值           | 用途                                                                                                                                          |
 | ---------------------------- | -------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -85,27 +85,30 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 | `SYNC_PROGRESS`              | boolean  | `0`              | 进度拉满总开关；`1` 时 complete 条目书籍章节/卷数、电影首集、TV/动画/真人分集拉到上限（收藏字段无变化时仍检查分集；失败记 failed 且下轮重试） |
 | `SYNC_INCLUDE_SP`            | boolean  | `0`              | 分集拉满是否纳入 SP；电影永不处理 SP                                                                                                          |
 | `SYNC_INCLUDE_OP_ED`         | boolean  | `0`              | 是否把 OP/ED（type 2/3）纳入拉满；默认关闭，电影永不处理                                                                                      |
+| `SYNC_MAX_EPISODES_PER_ITEM` | number   | `0`              | 单条每轮最多写入的分集数；`0` = 不限。设小可让长番分多轮补齐，未写完的条目保持 pending 而不占满整轮预算                                       |
 
-#### 4. 运行模式（3 项）
+#### 4. 运行模式（4 项）
 
-| 名称             | 数据类型 | 默认值 | 用途                                                                                     |
-| ---------------- | -------- | ------ | ---------------------------------------------------------------------------------------- |
-| `SYNC_DRY_RUN`   | boolean  | `0`    | `1` = 只输出计划，不写入任何数据                                                         |
-| `SYNC_MAX_ITEMS` | number   | `50`   | 单次运行处理的条目上限；增量跳过的条目不消耗预算。**`0` 不是「无限」**，低于 1 回落为 50 |
-| `FULL_SYNC`      | boolean  | `0`    | `1` = 忽略条目/页数上限并关闭增量跳过；首次迁移使用                                      |
+| 名称                  | 数据类型 | 默认值 | 用途                                                                                                                |
+| --------------------- | -------- | ------ | ------------------------------------------------------------------------------------------------------------------- |
+| `SYNC_DRY_RUN`        | boolean  | `0`    | `1` = 只输出计划，不写入任何数据                                                                                    |
+| `SYNC_MAX_ITEMS`      | number   | `50`   | 单次运行处理的条目上限；增量跳过的条目不消耗预算。**`0` 不是「无限」**，低于 1 回落为 50                            |
+| `FULL_SYNC`           | boolean  | `0`    | `1` = 忽略条目/页数上限并关闭增量跳过；首次迁移使用                                                                 |
+| `SYNC_TIME_BUDGET_MS` | number   | `0`    | 单轮时间预算（毫秒）；`0` = 关闭。到点主动收尾并正常落盘，避免被 CI 超时杀掉；仅常规运行生效，全量仍用 180 分钟窗口 |
 
-#### 5. 增量与产物（8 项）
+#### 5. 增量与产物（9 项）
 
-| 名称                        | 数据类型 | 默认值                         | 用途                                                                                  |
-| --------------------------- | -------- | ------------------------------ | ------------------------------------------------------------------------------------- |
-| `SYNC_INCREMENTAL`          | boolean  | `1`                            | 按条目指纹跳过已同步项；`FULL_SYNC=1` 时自动失效                                      |
-| `SYNC_STATE_FILE`           | path     | `.cache/sync-state.json`       | 增量指纹文件；删除即重新全量比对。CI 通过 cache 跨运行保留                            |
-| `SYNC_UNMATCHED_LOG`        | path     | `.cache/unmatched.json`        | 未匹配/歧义/重复目标名单（upsert 去重），供人工补外链                                 |
-| `SYNC_MATCH_AUDIT_FILE`     | path     | `.cache/match-audit.json`      | 匹配审计：每条目的匹配方式/候选/证据/结局（dry-run 也产出），错配复核与清理清单的依据 |
-| `REVIEW_STATE_MAX_AGE_DAYS` | number   | `30`                           | 名单按 `lastSeenAt` 老化的天数；`0` 永不清理；不按「本轮未出现」淘汰                  |
-| `SYNC_REPORT_FILE`          | path     | `.cache/sync-report.json`      | 机器可读运行报告                                                                      |
-| `SYNC_SUMMARY_FILE`         | path     | `.cache/sync-summary.md`       | Markdown 运行摘要（含待核对原因分布）                                                 |
-| `FULL_SYNC_CURSOR_FILE`     | path     | `.cache/full-sync-cursor.json` | 仅 `FULL_SYNC=1` 使用的分页游标；常规运行不读不写，空页自动清除该书架                 |
+| 名称                        | 数据类型 | 默认值                         | 用途                                                                                                            |
+| --------------------------- | -------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `SYNC_INCREMENTAL`          | boolean  | `1`                            | 按条目指纹跳过已同步项；`FULL_SYNC=1` 时自动失效                                                                |
+| `SYNC_STATE_FILE`           | path     | `.cache/sync-state.json`       | 增量指纹文件；删除即重新全量比对。CI 通过 cache 跨运行保留                                                      |
+| `SYNC_UNMATCHED_LOG`        | path     | `.cache/unmatched.json`        | 未匹配/歧义/重复目标名单（upsert 去重），供人工补外链                                                           |
+| `SYNC_MATCH_AUDIT_FILE`     | path     | `.cache/match-audit.json`      | 匹配审计：每条目的匹配方式/候选/证据/结局（dry-run 也产出），错配复核与清理清单的依据                           |
+| `REVIEW_STATE_MAX_AGE_DAYS` | number   | `30`                           | 名单按 `lastSeenAt` 老化的天数；`0` 永不清理；不按「本轮未出现」淘汰                                            |
+| `SYNC_REPORT_FILE`          | path     | `.cache/sync-report.json`      | 机器可读运行报告                                                                                                |
+| `SYNC_SUMMARY_FILE`         | path     | `.cache/sync-summary.md`       | Markdown 运行摘要（含待核对原因分布）                                                                           |
+| `FULL_SYNC_CURSOR_FILE`     | path     | `.cache/full-sync-cursor.json` | 仅 `FULL_SYNC=1` 使用的分页游标；常规运行不读不写，空页自动清除该书架                                           |
+| `SYNC_UNMATCHED_RETRY_DAYS` | number   | `7`                            | 未匹配条目退避上限天数：按 1/2/4/7 天递增跳过网络请求，但仍留在待核对名单；`0` = 不避让。已补外链的条目永不退避 |
 
 ### 配置注意事项
 
@@ -170,7 +173,8 @@ npm run cleanup -- audit/cleanup-list.txt --apply --set-type 1   # 同时把收�
 - **收藏时间无法迁移**：Bangumi API 不接受自定义收藏时间，服务端写 `updated_at`；
 - **真人影视匹配率**：Bangumi 对动画/书籍/游戏/音乐覆盖好，真人电影/电视剧覆盖弱，无外链的条目可能大量 unresolved——在 NeoDB 条目上补 Bangumi 外链后重跑即可命中；
 - **同名歧义**：多个精确同名候选且年份/媒体形态无法区分时，本轮不会写入，记 `ambiguous-bangumi-match`；这是刻意不猜，补外链即可解决；
-- `podcast` / `performance` 分类在 Bangumi 无对应类型，写入侧跳过。
+- `podcast` / `performance` 分类在 Bangumi 无对应类型，写入侧跳过；
+- **首次开启进度拉满会回填一次**：历史条目此前被记成「已同步」，开启后会重新检查分集（但不再需要 `FULL_SYNC`）。用 `SYNC_MAX_EPISODES_PER_ITEM` 与 `SYNC_TIME_BUDGET_MS` 分多轮推进即可。
 
 ## 开发校验
 
@@ -181,6 +185,8 @@ npm run verify:all   # 单元测试 + 映射断言 + 匹配断言 + 文档一致
 ```
 
 改动映射表或匹配规则时，同步更新 `scripts/verify-mapping.ts` / `verify-matching.ts` 与 [docs/mapping.md](docs/mapping.md)——三者必须一致。
+
+排查「跑得慢 / 追不平」时先看[增量同步性能诊断](docs/sync-performance.md)：其中给出各环节耗时模型、瓶颈排序、零并发优化清单与不破坏正确性的验证协议。
 
 ## License
 

@@ -15,7 +15,18 @@
 export type ProgressSignal =
   | { kind: 'not-applicable' }
   | { kind: 'unchanged' }
-  | { kind: 'written'; added: number }
+  | {
+      kind: 'written';
+      added: number;
+      /**
+       * 本轮受「单条上限」截断，仍有分集待补。
+       * 必须与 `failed` 分开：partial 是「还要继续」，failed 是「这轮没成」。
+       * partial 仍记 `written`（确实写了），但不能算进度完成。
+       */
+      partial?: boolean;
+      /** 截断时剩余待补集数，用于日志与摘要。 */
+      remaining?: number;
+    }
   | { kind: 'failed'; reason: string; message: string };
 
 export type WriteDecision = {

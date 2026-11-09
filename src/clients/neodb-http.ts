@@ -6,6 +6,7 @@
 import dotenv from 'dotenv';
 import got from 'got';
 import { consola } from 'consola';
+import { recordSleep } from '../metrics';
 import { sleep } from '../utils';
 
 dotenv.config();
@@ -43,7 +44,9 @@ export function neodbAuthHeaders(): Record<string, string> {
 }
 
 export async function neodbThrottle(): Promise<void> {
+  const begin = performance.now();
   await sleep(neodbDelayMs);
+  recordSleep('neodb', performance.now() - begin);
 }
 
 /** 把任意错误归一成「状态码 + 简短信息」，日志不再打印整包响应。 */

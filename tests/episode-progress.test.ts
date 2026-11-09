@@ -47,7 +47,7 @@ describe('分集拉满', () => {
     expect(markWatched).not.toHaveBeenCalled();
   });
 
-  it('部分集写入失败 → failed，已成功的集不回滚', async () => {
+  it('单集写入失败 → 立即短路，不再打剩余集（已成功的集不回滚）', async () => {
     const markWatched = vi.fn(async (_subjectId: number, episodeId: number) => {
       return episodeId !== 2;
     });
@@ -56,12 +56,14 @@ describe('分集拉满', () => {
       markWatched,
     });
 
+    // 行为变更说明：旧实现失败后仍会打完 3 集，白付 (n−k)·650ms；
+    // 现在首次失败即停，下一轮 missing 只剩失败集，天然重试。
     expect(result).toEqual({
       kind: 'failed',
       reason: 'episode-write-failed',
-      message: '1/3 集写入失败',
+      message: '1/3 集写入失败（首次失败即停止，剩余 1 集未尝试）',
     });
-    expect(markWatched).toHaveBeenCalledTimes(3);
+    expect(markWatched).toHaveBeenCalledTimes(2);
   });
 
   it('分集列表读取失败 → failed，不伪装成无分集', async () => {
@@ -132,6 +134,90 @@ describe('分集拉满', () => {
 
     expect(result).toEqual({ kind: 'written', added: 1, failed: 0 });
     expect(markWatched).toHaveBeenCalledTimes(1);
+    expect(markWatched.mock.calls[0]?.[1]).toBe(1);
+  });
+});
+
+describe('分集单条上限', () => {
+  it('截断时返回 partial 与剩余集数，只为截断内的集发请求', async () => {
+    const markWatched = vi.fn(async (_subjectId: number, _episodeId: number) => true);
+    const result = await fillEpisodeProgress(
+      42,
+      false,
+      false,
+      false,
+      { ...baseDeps, markWatched },
+      { maxEpisodes: 2 },
+    );
+
+    expect(result).toEqual({
+      kind: 'written',
+      added: 2,
+      failed: 0,
+      partial: true,
+      remaining: 1,
+    });
+    expect(markWatched).toHaveBeenCalledTimes(2);
+  });
+
+  it('未截断时不出现 partial / remaining 键（保持既有断言语义）', async () => {
+    const result = await fillEpisodeProgress(42, false, false, false, { ...baseDeps });
+    expect(result).toEqual({ kind: 'written', added: 3, failed: 0 });
+    expect('partial' in result).toBe(false);
+  });
+
+  it('上限大于缺口时视为未截断', async () => {
+    const result = await fillEpisodeProgress(
+      42,
+      false,
+      false,
+      false,
+      { ...baseDeps },
+      { maxEpisodes: 10 },
+    );
+    expect(result).toEqual({ kind: 'written', added: 3, failed: 0 });
+  });
+
+  it('上限为 0 或负数一律表示不限', async () => {
+    const zero = await fillEpisodeProgress(
+      42,
+      false,
+      false,
+      false,
+      { ...baseDeps },
+      { maxEpisodes: 0 },
+    );
+    expect(zero).toEqual({ kind: 'written', added: 3, failed: 0 });
+
+    const negative = await fillEpisodeProgress(
+      42,
+      false,
+      false,
+      false,
+      { ...baseDeps },
+      { maxEpisodes: -5 },
+    );
+    expect(negative).toEqual({ kind: 'written', added: 3, failed: 0 });
+  });
+
+  it('上限为 1 时只写第一集，剩余数正确', async () => {
+    const markWatched = vi.fn(async (_subjectId: number, _episodeId: number) => true);
+    const result = await fillEpisodeProgress(
+      42,
+      false,
+      false,
+      false,
+      { ...baseDeps, markWatched },
+      { maxEpisodes: 1 },
+    );
+
+    expect(result).toEqual({
+      kind: 'written',
+      added: 1,
+      failed: 0,
+      partial: true,
+      remaining: 2,
+    });
     expect(markWatched.mock.calls[0]?.[1]).toBe(1);
   });
 });

@@ -4,11 +4,12 @@
  * 只放传输与端点；分制换算、标题比较、年份过滤等**事实性逻辑**都在
  * `rules/`，保持纯函数可离线断言。
  */
-import got, { HTTPError } from 'got';
+import { HTTPError } from 'got';
 import { consola } from 'consola';
 import {
   BGM_API,
   authHeaders,
+  bangumiGot,
   bangumiThrottle,
   bangumiToken,
   isUnauthorized,
@@ -31,7 +32,7 @@ export async function getBangumiMe(): Promise<BangumiUser | null> {
     return null;
   }
   try {
-    return (await got(`${BGM_API}/v0/me`, {
+    return (await bangumiGot(`${BGM_API}/v0/me`, {
       headers: authHeaders(),
     }).json()) as BangumiUser;
   } catch (error) {
@@ -62,7 +63,7 @@ export async function getBangumiSubject(
   try {
     return {
       status: 'found',
-      value: (await got(`${BGM_API}/v0/subjects/${subjectId}`, {
+      value: (await bangumiGot(`${BGM_API}/v0/subjects/${subjectId}`, {
         headers: authHeaders(),
       }).json()) as BangumiSubject,
     };
@@ -106,9 +107,12 @@ export async function getBangumiCollection(
   try {
     return {
       status: 'found',
-      value: (await got(`${BGM_API}/v0/users/${username}/collections/${subjectId}`, {
-        headers: authHeaders(),
-      }).json()) as BangumiCollection,
+      value: (await bangumiGot(
+        `${BGM_API}/v0/users/${username}/collections/${subjectId}`,
+        {
+          headers: authHeaders(),
+        },
+      ).json()) as BangumiCollection,
     };
   } catch (error) {
     const status = error instanceof HTTPError ? error.response.statusCode : null;
@@ -153,7 +157,7 @@ export async function upsertBangumiCollection(
     return false;
   }
   try {
-    await got.post(`${BGM_API}/v0/users/-/collections/${subjectId}`, {
+    await bangumiGot.post(`${BGM_API}/v0/users/-/collections/${subjectId}`, {
       headers: authHeaders(),
       json: payload,
     });
@@ -184,7 +188,7 @@ export async function getBangumiEpisodes(
   try {
     while (true) {
       await bangumiThrottle();
-      const page = (await got(`${BGM_API}/v0/episodes`, {
+      const page = (await bangumiGot(`${BGM_API}/v0/episodes`, {
         headers: authHeaders(),
         searchParams: { subject_id: subjectId, limit: 200, offset },
       }).json()) as { data?: BangumiEpisode[]; total?: number };
@@ -229,7 +233,7 @@ export async function getBangumiEpisodeStates(
   try {
     while (true) {
       await bangumiThrottle();
-      const page = (await got(
+      const page = (await bangumiGot(
         `${BGM_API}/v0/users/-/collections/${subjectId}/episodes`,
         {
           headers: authHeaders(),
@@ -276,7 +280,7 @@ export async function markBangumiEpisodeWatched(
   if (!bangumiToken) return false;
   try {
     await bangumiThrottle();
-    await got.put(`${BGM_API}/v0/users/-/collections/-/episodes/${episodeId}`, {
+    await bangumiGot.put(`${BGM_API}/v0/users/-/collections/-/episodes/${episodeId}`, {
       headers: authHeaders(),
       json: { type: 2 },
     });
@@ -318,7 +322,7 @@ export async function searchBangumiSubjects(
     if (types?.length) {
       body.filter = { type: types };
     }
-    const result = (await got
+    const result = (await bangumiGot
       .post(`${BGM_API}/v0/search/subjects`, {
         headers: authHeaders(),
         searchParams: { limit, offset: 0 },

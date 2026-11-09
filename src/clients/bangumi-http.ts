@@ -4,8 +4,9 @@
  * Bangumi 要求带可识别的 UA 与真实链接；限流用固定小延迟规避。
  */
 import dotenv from 'dotenv';
-import { HTTPError } from 'got';
+import got, { HTTPError } from 'got';
 import { consola } from 'consola';
+import { recordSleep } from '../metrics';
 import { sleep } from '../utils';
 
 dotenv.config();
@@ -23,6 +24,38 @@ export const bangumiUserAgent =
 
 export const BGM_API = 'https://api.bgm.tv';
 
+/**
+ * 重试只用于**幂等**请求：GET 全部可重试；分集 PUT 把 `type` 设为 2 也是幂等的。
+ * POST（搜索 / 收藏 upsert）刻意排除——重复提交的语义没有把握，宁可按失败重试下一轮。
+ */
+export function retriesMethod(method: string): boolean {
+  return method === 'GET' || method === 'PUT';
+}
+
+/**
+ * Bangumi 共享 got 实例。
+ *
+ * 之前每个端点各自裸调 `got(...)`：没有超时、没有重试，一次 429/500 就把该条目
+ * 判成 failed，要等到第二天。这里的退避（≥1s，2 的幂）本身就比 `BANGUMI_REQUEST_DELAY_MS`
+ * 更慢，因此重试不会把瞬时速率打高。
+ */
+export const bangumiGot = got.extend({
+  timeout: { request: 30000 },
+  retry: {
+    limit: 2,
+    methods: ['GET', 'PUT'],
+    statusCodes: [408, 429, 500, 502, 503, 504],
+    errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN'],
+    calculateDelay: ({ attemptCount, error, computedValue }) => {
+      const retryAfter = Number(error?.response?.headers?.['retry-after']);
+      if (Number.isFinite(retryAfter) && retryAfter > 0) {
+        return retryAfter * 1000;
+      }
+      return Math.min(2 ** attemptCount * 500, 8000) || computedValue;
+    },
+  },
+});
+
 export function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     accept: 'application/json',
@@ -39,7 +72,9 @@ export function isUnauthorized(error: unknown): boolean {
 }
 
 export async function bangumiThrottle(): Promise<void> {
+  const begin = performance.now();
   await sleep(bangumiDelayMs);
+  recordSleep('bangumi', performance.now() - begin);
 }
 
 /**

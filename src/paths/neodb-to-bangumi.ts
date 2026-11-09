@@ -22,6 +22,14 @@ import {
 } from '../clients/neodb-shelf';
 import { bangumiThrottle, bangumiToken } from '../clients/bangumi-http';
 import {
+  addItemTime,
+  metricsSnapshot,
+  resetMetrics,
+  sleepCount,
+  timeStage,
+  type RunMetricsSnapshot,
+} from '../metrics';
+import {
   getBangumiCollection,
   getBangumiEpisodeStates,
   getBangumiEpisodes,
@@ -58,8 +66,12 @@ import {
   shouldSkipClaim,
   type TargetClaim,
 } from '../rules/target-claim';
+import { isUpToDate, progressApplicable } from '../rules/progress-gate';
+import { timeBudgetExhausted, type StopReason } from '../rules/budget';
+import { nextCheckAt, shouldRecheck } from '../rules/recheck';
 import {
   categoryAllowed,
+  createSyncState,
   fingerprintMark,
   loadFullSyncCursor,
   loadSyncState,
@@ -81,7 +93,13 @@ import {
   type PathReport,
   type UnmatchedMap,
 } from '../sync-report';
-import type { BangumiSubject, NeodbItem, NeodbShelfMark, ShelfType } from '../types';
+import type {
+  BangumiSubject,
+  NeodbItem,
+  NeodbShelfMark,
+  ReadResult,
+  ShelfType,
+} from '../types';
 
 type ItemOutcome = 'written' | 'unchanged' | 'skipped' | 'unresolved' | 'failed';
 
@@ -108,6 +126,8 @@ type SyncContext = {
   targetClaims: Map<number, TargetClaim>;
   unmatched: UnmatchedMap;
   aborted: boolean;
+  /** 本轮提前停止的原因：条目配额或时间预算；未触发为 null。 */
+  stopReason: StopReason;
   /** 匹配审计：按处理顺序累积，运行结束统一落盘（含 dry-run）。 */
   matchAudit: MatchAuditEntry[];
 };
@@ -144,11 +164,17 @@ export type SyncRunResult = {
   unmatched: UnmatchedMap;
   truncatedShelves: ShelfType[];
   matchAudit: MatchAuditEntry[];
+  /** 本轮耗时与请求等待的观测快照；只用于诊断，不参与任何写入判定。 */
+  metrics: RunMetricsSnapshot;
+  /** 提前停止的原因（条目配额 / 时间预算）；未触发为 null。 */
+  stopReason: StopReason;
 };
 
 export default async function runNeodbToBangumi(
   config: SyncConfig,
 ): Promise<SyncRunResult> {
+  // 观测累加器是模块级的：每轮开始清零，避免同进程多次运行（或测试）互相污染。
+  resetMetrics();
   const report = createReport();
   const unmatched = loadUnmatched(config.sync.unmatchedLog);
   const truncatedShelves: ShelfType[] = [];
@@ -162,6 +188,8 @@ export default async function runNeodbToBangumi(
       unmatched,
       truncatedShelves,
       matchAudit: [],
+      metrics: metricsSnapshot(),
+      stopReason: null,
     };
   }
   if (!bangumiToken) {
@@ -172,6 +200,8 @@ export default async function runNeodbToBangumi(
       unmatched,
       truncatedShelves,
       matchAudit: [],
+      metrics: metricsSnapshot(),
+      stopReason: null,
     };
   }
   const me = await getBangumiMe();
@@ -183,13 +213,15 @@ export default async function runNeodbToBangumi(
       unmatched,
       truncatedShelves,
       matchAudit: [],
+      metrics: metricsSnapshot(),
+      stopReason: null,
     };
   }
 
   const state: SyncState =
     config.sync.incremental && !config.sync.fullSync
       ? loadSyncState(config.sync.stateFile)
-      : {};
+      : createSyncState();
   const ctx: SyncContext = {
     config,
     username: me.username,
@@ -200,6 +232,7 @@ export default async function runNeodbToBangumi(
     targetClaims: new Map(),
     unmatched,
     aborted: false,
+    stopReason: null,
     matchAudit: [],
   };
 
@@ -213,6 +246,8 @@ export default async function runNeodbToBangumi(
   // 配额只统计真正进入处理流程的条目：增量跳过不消耗预算。否则定时运行每天都会在
   // 前 maxItems 条已同步条目上原地打转，永远走不到新增条目。
   let budgetUsed = 0;
+  // 时间预算从遍历开始计时（不含凭据探测）；全量运行不使用它。
+  const walkStartedAt = Date.now();
 
   for (const shelfType of config.sync.shelfTypes) {
     if (ctx.aborted) break;
@@ -236,23 +271,48 @@ export default async function runNeodbToBangumi(
 
         for (const mark of ordered) {
           // 增量跳过在配额判断之前：已同步条目既不计扫描配额，也不消耗条目预算。
+          // 判定交给纯函数：除指纹外还要看「进度是否已拉满」——否则打开
+          // SYNC_PROGRESS 后，历史上已记指纹的条目永远轮不到补分集。
+          const fingerprint = fingerprintMark(mark);
           if (
             config.sync.incremental &&
             !config.sync.fullSync &&
-            ctx.state[mark.item.uuid] === fingerprintMark(mark)
+            isUpToDate({
+              mark,
+              fingerprint,
+              marks: ctx.state.marks,
+              progress: ctx.state.progress,
+              progressEnabled: config.sync.progress,
+            })
           ) {
             record(report, 'skipped');
             report.scanned += 1;
             continue;
           }
-          if (!config.sync.fullSync && budgetUsed >= config.sync.maxItems) {
-            return false;
+          if (!config.sync.fullSync) {
+            // 双上限、先到者停：条目轻时按条数，条目重时按时间。
+            if (budgetUsed >= config.sync.maxItems) {
+              ctx.stopReason = 'max-items';
+              return false;
+            }
+            if (
+              timeBudgetExhausted(Date.now() - walkStartedAt, config.sync.timeBudgetMs)
+            ) {
+              ctx.stopReason = 'time-budget';
+              consola.info(
+                `时间预算用尽（${config.sync.timeBudgetMs}ms），本轮主动收尾；` +
+                  `已处理条目的状态会正常落盘。`,
+              );
+              return false;
+            }
           }
           report.scanned += 1;
           budgetUsed += 1;
 
           // 单条未预期异常不能葬送整轮：认证失败才中止，其余记 failed 后继续，
           // 保证审计 / 报告 / 摘要仍能落盘。
+          const itemStartedAt = performance.now();
+          const sleepsBefore = sleepCount('bangumi');
           let outcome: ItemOutcome = 'failed';
           try {
             outcome = await processMark(mark, ctx);
@@ -274,8 +334,13 @@ export default async function runNeodbToBangumi(
             );
           } finally {
             // 每条目结束后统一节流：一次处理会扇出搜索、读收藏、分集等多个请求。
-            await bangumiThrottle();
+            // 但分集路径已经在每个请求前睡过（列表/状态/逐集 PUT），此时再睡一次
+            // 是纯重复计费，故只在「本条没有发生过任何 Bangumi 等待」时补一次。
+            if (sleepCount('bangumi') === sleepsBefore) {
+              await bangumiThrottle();
+            }
           }
+          addItemTime(performance.now() - itemStartedAt);
           record(report, outcome);
         }
         return true;
@@ -332,6 +397,8 @@ export default async function runNeodbToBangumi(
     unmatched,
     truncatedShelves,
     matchAudit: ctx.matchAudit,
+    metrics: metricsSnapshot(),
+    stopReason: ctx.stopReason,
   };
 }
 
@@ -370,8 +437,24 @@ async function processMark(
     return finish('skipped', 'unsupported-category');
   }
 
+  // ── 未匹配退避：同一缺口不必每天重做一遍完整匹配 ──
+  // 有外链的条目永不退避：补链是人工介入，必须当轮生效，否则补了也看不到结果。
+  if (
+    config.sync.unmatchedRetryDays > 0 &&
+    extractBangumiSubjectId(item.external_resources) == null
+  ) {
+    const entry = ctx.unmatched.get(item.uuid);
+    if (entry && !shouldRecheck(entry, new Date(), config.sync.unmatchedRetryDays)) {
+      consola.info(
+        `未匹配条目处于退避期，跳过网络匹配: uuid=${item.uuid} ` +
+          `next=${entry.nextCheckAt ?? '未记录'}（${label}）`,
+      );
+      return finish('unresolved', 'unmatched-backoff');
+    }
+  }
+
   // ── 匹配 ──
-  const match = await resolveMatch(item, ctx);
+  const match = await timeStage('match', () => resolveMatch(item, ctx));
   if (match.kind === 'failed') {
     if (match.auth) {
       throw new AuthAbortError(match.reason);
@@ -429,7 +512,9 @@ async function processMark(
   }
 
   // ── 读取目标收藏：error 绝不当作 absent ──
-  const existingRes = await getBangumiCollection(ctx.username, subjectId);
+  const existingRes = await timeStage('read', () =>
+    getBangumiCollection(ctx.username, subjectId),
+  );
   if (existingRes.status === 'error') {
     return finish('failed', 'target-read-failed', existingRes.message);
   }
@@ -502,7 +587,9 @@ async function processMark(
     mark.shelf_type === 'complete' &&
     item.category === 'book'
   ) {
-    const subjectRes = await getBangumiSubject(subjectId);
+    const subjectRes = await timeStage('read', () =>
+      readSubjectCached(subjectId, ctx.subjectCache),
+    );
     if (subjectRes.status !== 'found') {
       return finish(
         'failed',
@@ -562,14 +649,16 @@ async function processMark(
   // ── 收藏 upsert：只在字段有差异或书籍进度待写时发送 ──
   const needsCollectionWrite = differs || bookProgressPending;
   if (needsCollectionWrite) {
-    const ok = await upsertBangumiCollection(subjectId, {
-      type: status.type,
-      rate,
-      comment,
-      private: privatePlan.private,
-      ...(epStatus != null ? { ep_status: epStatus } : {}),
-      ...(volStatus != null ? { vol_status: volStatus } : {}),
-    });
+    const ok = await timeStage('write', () =>
+      upsertBangumiCollection(subjectId, {
+        type: status.type,
+        rate,
+        comment,
+        private: privatePlan.private,
+        ...(epStatus != null ? { ep_status: epStatus } : {}),
+        ...(volStatus != null ? { vol_status: volStatus } : {}),
+      }),
+    );
     if (!ok) {
       return finish('failed', 'collection-write-failed');
     }
@@ -587,11 +676,15 @@ async function processMark(
   let progress: ProgressSignal = { kind: 'not-applicable' };
   if (episodesApplicable) {
     progress = toProgressSignal(
-      await fillEpisodeProgress(
-        subjectId,
-        item.category === 'movie',
-        config.sync.includeSp,
-        config.sync.includeOpEd,
+      await timeStage('episode', () =>
+        fillEpisodeProgress(
+          subjectId,
+          item.category === 'movie',
+          config.sync.includeSp,
+          config.sync.includeOpEd,
+          {},
+          { maxEpisodes: config.sync.maxEpisodesPerItem },
+        ),
       ),
     );
   }
@@ -614,38 +707,75 @@ async function processMark(
     return finish('failed', decision.reason, message);
   }
 
-  rememberState(ctx, item.uuid, fingerprint);
+  const progressPartial = progress.kind === 'written' && progress.partial === true;
+  rememberState(ctx, item.uuid, fingerprint, subjectId);
+  // 进度适用、本轮没失败、也没被上限截断 → 记为已拉满；否则保持 pending 下一轮继续。
+  if (!progressPartial && progressApplicable(mark, config.sync.progress)) {
+    markProgressDone(ctx, item.uuid);
+  }
+  if (progressPartial) {
+    consola.info(
+      `分集未拉满，保留 pending 供下一轮继续: subject/${subjectId} ` +
+        `remaining=${progress.kind === 'written' ? (progress.remaining ?? '?') : '?'}（${label}）`,
+    );
+  }
   return finish(
     decision.outcome,
     decision.outcome === 'written'
-      ? (decision.reason ?? (reasons.join('+') || 'progress'))
+      ? progressPartial
+        ? 'progress-partial'
+        : (decision.reason ?? (reasons.join('+') || 'progress'))
       : null,
   );
 }
 
-function rememberState(ctx: SyncContext, uuid: string, fingerprint: string): void {
+function rememberState(
+  ctx: SyncContext,
+  uuid: string,
+  fingerprint: string,
+  subjectId: number,
+): void {
   if (ctx.config.sync.dryRun) {
     return;
   }
-  ctx.state[uuid] = fingerprint;
+  ctx.state.marks[uuid] = fingerprint;
+  // 只作诊断留痕（清理错配时对照），不参与匹配：复用旧目标会让一次错配被永久固化。
+  ctx.state.targets[uuid] = subjectId;
+  ctx.stateDirty = true;
+}
+
+/** 标记该条目的进度已拉满，允许之后被增量跳过。 */
+function markProgressDone(ctx: SyncContext, uuid: string): void {
+  if (ctx.config.sync.dryRun) {
+    return;
+  }
+  ctx.state.progress[uuid] = 'done';
   ctx.stateDirty = true;
 }
 
 /**
- * 清掉某条目的增量指纹，让下一轮重新处理。
+ * 清掉某条目的增量记录，让下一轮重新处理。
  *
- * 只在分集失败时使用：指纹只覆盖收藏字段（状态/评分/短评/隐私），不含分集；
- * 若留着旧指纹，下一轮会把这条当成「已同步」直接跳过，失败的分集永远补不上。
+ * 指纹只覆盖收藏字段（状态/评分/短评/隐私），不含分集；若留着旧指纹，
+ * 下一轮会把这条当成「已同步」直接跳过，失败的分集永远补不上。
+ * `progress` 同样要清，否则「已 done」的旧标记会让失败的进度被跳过。
  */
 function forgetState(ctx: SyncContext, uuid: string): void {
   if (ctx.config.sync.dryRun) {
     return;
   }
-  if (!(uuid in ctx.state)) {
-    return;
+  let dirty = false;
+  if (uuid in ctx.state.marks) {
+    delete ctx.state.marks[uuid];
+    dirty = true;
   }
-  delete ctx.state[uuid];
-  ctx.stateDirty = true;
+  if (uuid in ctx.state.progress) {
+    delete ctx.state.progress[uuid];
+    dirty = true;
+  }
+  if (dirty) {
+    ctx.stateDirty = true;
+  }
 }
 
 /** 审计条目工厂：失败路径（异常隔离）也要能产出同样形状的记录。 */
@@ -681,7 +811,12 @@ function truncateError(message: string): string {
 function toProgressSignal(result: EpisodeProgressResult): ProgressSignal {
   switch (result.kind) {
     case 'written':
-      return { kind: 'written', added: result.added };
+      return {
+        kind: 'written',
+        added: result.added,
+        ...(result.partial ? { partial: true } : {}),
+        ...(result.remaining != null ? { remaining: result.remaining } : {}),
+      };
     case 'unchanged':
       return { kind: 'unchanged' };
     case 'not-applicable':
@@ -697,6 +832,9 @@ function recordUnmatched(
   reason: string,
   label: string,
 ): void {
+  const previous = ctx.unmatched.get(mark.item.uuid);
+  const attempts = (previous?.attempts ?? 0) + 1;
+  const next = nextCheckAt(attempts, new Date(), ctx.config.sync.unmatchedRetryDays);
   upsertUnmatched(ctx.unmatched, mark.item.uuid, {
     reason,
     title: label,
@@ -704,6 +842,8 @@ function recordUnmatched(
     category: String(mark.item.category),
     shelf: String(mark.shelf_type),
     neodbUuid: mark.item.uuid,
+    attempts,
+    ...(next ? { nextCheckAt: next } : {}),
   });
 }
 
@@ -739,17 +879,14 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
     return { kind: 'unresolved', reason: 'no-bangumi-match', evidence: null };
   }
 
-  const yearRes = await resolveItemYear(item, ctx);
-  if (yearRes.kind === 'failed') {
-    consola.warn(
-      `NeoDB 条目年份读取失败，本轮不做无年份匹配: ${item.display_title || item.title}`,
-    );
-    return { kind: 'failed', reason: 'bangumi-year-fetch-failed', auth: false };
-  }
-
   const mediaForm = neodbCategoryToMediaForm(item.category);
   let sawExact = false;
   let lastExactIds: number[] | null = null;
+  // 年份是**裁决输入**，不是匹配的前置条件：只有出现精确同名候选时才需要它。
+  // 搜不到候选时年份对结论毫无影响，提前读取等于白付一次 NeoDB 详情请求，
+  // 而这类条目恰恰每轮都会重来。
+  let sourceYear: number | null = null;
+  let yearResolved = false;
 
   // 第二级：按候选标题依次搜索；第三级：精确同名 + 证据裁决。
   for (const title of titleCandidates(item)) {
@@ -770,9 +907,21 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
     sawExact = true;
     lastExactIds = exact.map((s) => s.id);
 
+    if (!yearResolved) {
+      const yearRes = await resolveItemYear(item, ctx);
+      if (yearRes.kind === 'failed') {
+        consola.warn(
+          `NeoDB 条目年份读取失败，本轮不做无年份匹配: ${item.display_title || item.title}`,
+        );
+        return { kind: 'failed', reason: 'bangumi-year-fetch-failed', auth: false };
+      }
+      sourceYear = yearRes.year;
+      yearResolved = true;
+    }
+
     const picked = await pickExactMatch(
       exact,
-      yearRes.year,
+      sourceYear,
       ctx.config.sync.yearTolerance,
       {
         mediaForm,
@@ -787,7 +936,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
       const evidence = await resolveCandidateEvidence(picked.subject, ctx);
       consola.info(
         `Bangumi 匹配: uuid=${item.uuid} via=title title="${title}" ` +
-          `year=${yearRes.year ?? 'missing'} media=${mediaForm ?? 'unknown'} ` +
+          `year=${sourceYear ?? 'missing'} media=${mediaForm ?? 'unknown'} ` +
           `candidates=${exact.length} chosen=${picked.subject.id}`,
       );
       return {
@@ -796,7 +945,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
         via: 'title',
         subjectName: picked.subject.name_cn || picked.subject.name,
         evidence: {
-          sourceYear: yearRes.year,
+          sourceYear,
           sourceMediaForm: mediaForm,
           candidateYear: evidence.year,
           candidateMediaForm: evidence.mediaForm,
@@ -808,7 +957,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
     if (picked.status === 'ambiguous') {
       consola.warn(
         `同名候选无法唯一裁决: uuid=${item.uuid} title="${title}" ` +
-          `year=${yearRes.year ?? 'missing'} media=${mediaForm ?? 'unknown'} ` +
+          `year=${sourceYear ?? 'missing'} media=${mediaForm ?? 'unknown'} ` +
           `candidates=${picked.candidates
             .map((c) => `${c.id}(${c.name_cn || c.name})`)
             .join(',')}`,
@@ -822,7 +971,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
         kind: 'unresolved',
         reason: 'ambiguous-bangumi-match',
         evidence: {
-          sourceYear: yearRes.year,
+          sourceYear,
           sourceMediaForm: mediaForm,
           candidateYear: held?.year ?? null,
           candidateMediaForm: held?.mediaForm ?? null,
@@ -838,7 +987,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
     reason: sawExact ? 'bangumi-all-rejected-by-year' : 'no-bangumi-match',
     evidence: sawExact
       ? {
-          sourceYear: yearRes.year,
+          sourceYear,
           sourceMediaForm: mediaForm,
           candidateYear: null,
           candidateMediaForm: null,
@@ -867,21 +1016,38 @@ async function resolveCandidateEvidence(
   };
 }
 
+/**
+ * 带缓存的条目读取，**保留三态**。
+ *
+ * 调用方（书籍进度）需要区分「读取失败」与「条目不存在」，因此不能像旧版
+ * `getFullSubject` 那样只返回 `null`——那会把错误 message 丢掉。缓存只写成功
+ * 结果，失败仍留给下一轮重试。
+ *
+ * `read` 可注入，便于离线断言「同一 subject 一轮只读一次」。
+ */
+export async function readSubjectCached(
+  subjectId: number,
+  cache: Map<number, BangumiSubject>,
+  read: (id: number) => Promise<ReadResult<BangumiSubject>> = getBangumiSubject,
+): Promise<ReadResult<BangumiSubject>> {
+  const cached = cache.get(subjectId);
+  if (cached) {
+    return { status: 'found', value: cached };
+  }
+  const result = await read(subjectId);
+  if (result.status === 'found') {
+    cache.set(subjectId, result.value);
+  }
+  return result;
+}
+
 /** 完整条目缓存：只缓存成功解析的，失败下轮重试。 */
 async function getFullSubject(
   subjectId: number,
   ctx: SyncContext,
 ): Promise<BangumiSubject | null> {
-  const cached = ctx.subjectCache.get(subjectId);
-  if (cached) {
-    return cached;
-  }
-  const result = await getBangumiSubject(subjectId);
-  if (result.status !== 'found') {
-    return null;
-  }
-  ctx.subjectCache.set(subjectId, result.value);
-  return result.value;
+  const result = await readSubjectCached(subjectId, ctx.subjectCache);
+  return result.status === 'found' ? result.value : null;
 }
 
 /**
@@ -918,10 +1084,22 @@ export type EpisodeProgressFailureReason =
   'episodes-read-failed' | 'episode-states-read-failed' | 'episode-write-failed';
 
 export type EpisodeProgressResult =
-  | { kind: 'written'; added: number; failed: number }
+  | {
+      kind: 'written';
+      added: number;
+      failed: number;
+      /** 受单条上限截断：本轮已写入部分，仍有待补。 */
+      partial?: boolean;
+      remaining?: number;
+    }
   | { kind: 'unchanged' }
   | { kind: 'not-applicable'; reason: 'no-episodes' | 'not-collected' }
   | { kind: 'failed'; reason: EpisodeProgressFailureReason; message: string };
+
+/** 分集写入选项：`maxEpisodes` 为 0 表示不限（默认，保持旧行为）。 */
+export type EpisodeProgressOptions = {
+  maxEpisodes?: number;
+};
 
 /** 可注入的读取/写入依赖，便于离线断言失败路径。 */
 export type EpisodeProgressDeps = {
@@ -951,6 +1129,7 @@ export async function fillEpisodeProgress(
   includeSp: boolean,
   includeOpEd: boolean,
   deps: Partial<EpisodeProgressDeps> = {},
+  options: EpisodeProgressOptions = {},
 ): Promise<EpisodeProgressResult> {
   const { getEpisodes, getStates, markWatched } = {
     ...defaultEpisodeProgressDeps,
@@ -1015,28 +1194,41 @@ export async function fillEpisodeProgress(
     return { kind: 'unchanged' };
   }
 
+  // 单条上限：长番不必在一轮里吃完预算，剩下的留给下一轮（进度仍记 pending）。
+  const cap = Math.max(0, Math.floor(options.maxEpisodes ?? 0));
+  const targets = cap > 0 ? plan.missing.slice(0, cap) : plan.missing;
+
   let added = 0;
   let failed = 0;
-  for (const episodeId of plan.missing) {
+  for (const episodeId of targets) {
     if (await markWatched(subjectId, episodeId)) {
       added += 1;
     } else {
+      // 首次失败即停止本条剩余集：继续打只会白付 `(n−k)·650ms`，
+      // 且失败集下一轮天然重试（已成功的集不回滚）。
       failed += 1;
+      break;
     }
   }
+  const attempted = added + failed;
+  const remaining = plan.missing.length - added;
   consola.info(
     `分集进度: subject/${subjectId} kind=${isMovie ? 'movie' : 'tv'} ` +
       `target=${plan.target.length} missing=${plan.missing.length} ` +
-      `added=${added} failed=${failed}`,
+      `attempted=${attempted} added=${added} failed=${failed} remaining=${remaining}`,
   );
 
   if (failed > 0) {
-    // 已成功的集不回滚：下一轮 planEpisodeProgress 的 missing 只剩失败集，天然重试。
     return {
       kind: 'failed',
       reason: 'episode-write-failed',
-      message: `${failed}/${plan.missing.length} 集写入失败`,
+      message:
+        `${failed}/${plan.missing.length} 集写入失败` +
+        `（首次失败即停止，剩余 ${plan.missing.length - attempted} 集未尝试）`,
     };
+  }
+  if (remaining > 0) {
+    return { kind: 'written', added, failed: 0, partial: true, remaining };
   }
   return { kind: 'written', added, failed };
 }

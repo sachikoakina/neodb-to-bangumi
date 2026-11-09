@@ -14,6 +14,7 @@ import {
   neodbThrottle,
   neodbToken,
 } from './neodb-http';
+import { timeStage } from '../metrics';
 import type { NeodbItem, NeodbMe, NeodbPagedMark, ShelfType } from '../types';
 
 /** GET /api/token —— 整轮运行前低成本校验凭据。 */
@@ -132,7 +133,7 @@ export async function walkShelfPages(
   const lastPage = startPage + Math.max(1, Math.floor(maxPages)) - 1;
 
   for (let page = startPage; page <= lastPage; page += 1) {
-    const result = await fetchPage({ shelfType, page });
+    const result = await timeStage('shelf', () => fetchPage({ shelfType, page }));
     if (result === null) {
       consola.warn(`书架 ${shelfType} 在第 ${page} 页因错误中止。`);
       return { truncated: true };

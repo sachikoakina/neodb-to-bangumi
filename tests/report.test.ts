@@ -86,6 +86,54 @@ describe('待核对名单 upsert', () => {
       reason: 'ambiguous-bangumi-match',
     });
   });
+
+  it('退避字段：attempts 与 nextCheckAt 会被写入并在下次覆盖', () => {
+    const map = new Map();
+    upsertUnmatched(map, 'uuid-3', {
+      reason: 'no-bangumi-match',
+      title: 'B',
+      itemUrl: 'https://neodb.social/book/b',
+      attempts: 1,
+      nextCheckAt: '2026-11-10T00:00:00.000Z',
+    });
+    expect(map.get('uuid-3')).toMatchObject({
+      attempts: 1,
+      nextCheckAt: '2026-11-10T00:00:00.000Z',
+    });
+
+    upsertUnmatched(map, 'uuid-3', {
+      reason: 'no-bangumi-match',
+      title: 'B',
+      itemUrl: 'https://neodb.social/book/b',
+      attempts: 2,
+      nextCheckAt: '2026-11-12T00:00:00.000Z',
+    });
+    expect(map.get('uuid-3')).toMatchObject({
+      attempts: 2,
+      nextCheckAt: '2026-11-12T00:00:00.000Z',
+    });
+  });
+
+  it('未提供退避字段时不覆盖已有值', () => {
+    const map = new Map();
+    upsertUnmatched(map, 'uuid-4', {
+      reason: 'no-bangumi-match',
+      title: 'C',
+      itemUrl: 'https://neodb.social/book/c',
+      attempts: 3,
+      nextCheckAt: '2026-11-20T00:00:00.000Z',
+    });
+    upsertUnmatched(map, 'uuid-4', {
+      reason: 'duplicate-target',
+      title: 'C',
+      itemUrl: 'https://neodb.social/book/c',
+    });
+    expect(map.get('uuid-4')).toMatchObject({
+      reason: 'duplicate-target',
+      attempts: 3,
+      nextCheckAt: '2026-11-20T00:00:00.000Z',
+    });
+  });
 });
 
 describe('摘要渲染', () => {
@@ -124,6 +172,65 @@ describe('摘要渲染', () => {
     expect(md).toContain('| 待核对原因 | 条目数 |');
     expect(md).toContain('| no-bangumi-match | 3 |');
     expect(md).toContain('| ambiguous-bangumi-match | 2 |');
+  });
+
+  it('不传 metrics 时不出现阶段耗时表（保持旧输出）', () => {
+    const md = renderSummaryMarkdown(createReport(), {
+      startedAt: '2026-11-05T00:00:00Z',
+      finishedAt: '2026-11-05T00:01:00Z',
+      dryRun: false,
+      fullSync: false,
+      shelves: ['complete'],
+      truncatedShelves: [],
+      unmatchedCount: 0,
+    });
+    expect(md).not.toContain('| 阶段 |');
+    expect(md).not.toContain('固定等待');
+  });
+
+  it('传入 metrics 时追加阶段耗时表与等待统计', () => {
+    const md = renderSummaryMarkdown(createReport(), {
+      startedAt: '2026-11-05T00:00:00Z',
+      finishedAt: '2026-11-05T00:01:00Z',
+      dryRun: false,
+      fullSync: false,
+      shelves: ['complete'],
+      truncatedShelves: [],
+      unmatchedCount: 0,
+      metrics: {
+        wallMs: 1000,
+        sleeps: { bangumi: 2, neodb: 0 },
+        sleepMs: { bangumi: 800, neodb: 0 },
+        stages: {
+          shelf: { count: 4, totalMs: 500, p50Ms: 125, p90Ms: 160, maxMs: 200 },
+          match: { count: 0, totalMs: 0, p50Ms: 0, p90Ms: 0, maxMs: 0 },
+          read: { count: 1, totalMs: 300, p50Ms: 300, p90Ms: 300, maxMs: 300 },
+          write: { count: 0, totalMs: 0, p50Ms: 0, p90Ms: 0, maxMs: 0 },
+          episode: { count: 0, totalMs: 0, p50Ms: 0, p90Ms: 0, maxMs: 0 },
+        },
+        items: { count: 3, totalMs: 900, p50Ms: 300, p90Ms: 400, maxMs: 400 },
+      },
+    });
+    expect(md).toContain('| 阶段 | 次数 | 总耗时 | 占墙钟 |');
+    expect(md).toContain('| 书架分页 | 4 | 500ms | 50.0% |');
+    expect(md).toContain('| 读目标收藏 | 1 | 300ms | 30.0% |');
+    expect(md).toContain('固定等待：Bangumi 2 次');
+    // 次数为 0 的阶段不占行
+    expect(md).not.toContain('| 匹配（搜索/候选详情） |');
+  });
+
+  it('停止原因会出现在摘要里', () => {
+    const md = renderSummaryMarkdown(createReport(), {
+      startedAt: '2026-11-05T00:00:00Z',
+      finishedAt: '2026-11-05T00:01:00Z',
+      dryRun: false,
+      fullSync: false,
+      shelves: ['complete'],
+      truncatedShelves: [],
+      unmatchedCount: 0,
+      stopReason: 'time-budget',
+    });
+    expect(md).toContain('时间预算用尽');
   });
 });
 

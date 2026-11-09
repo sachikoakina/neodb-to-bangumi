@@ -52,6 +52,9 @@ export const ENV_KEYS: readonly string[] = [
   'REVIEW_STATE_MAX_AGE_DAYS',
   'SYNC_REPORT_FILE',
   'SYNC_SUMMARY_FILE',
+  'SYNC_TIME_BUDGET_MS',
+  'SYNC_MAX_EPISODES_PER_ITEM',
+  'SYNC_UNMATCHED_RETRY_DAYS',
 ];
 
 const VALID_CATEGORIES: readonly string[] = [
@@ -213,6 +216,12 @@ export type SyncConfig = {
     reviewStateMaxAgeDays: number;
     reportFile: string;
     summaryFile: string;
+    /** 单轮时间预算（毫秒）；0 表示不限制。仅常规运行生效。 */
+    timeBudgetMs: number;
+    /** 单条每轮最多写入的分集数；0 表示不限。 */
+    maxEpisodesPerItem: number;
+    /** 未匹配条目的退避上限天数；0 表示不避让，每轮都重试。 */
+    unmatchedRetryDays: number;
   };
 };
 
@@ -289,6 +298,16 @@ export function loadSyncConfig(): SyncConfig {
       ),
       reportFile: envString('SYNC_REPORT_FILE', '.cache/sync-report.json'),
       summaryFile: envString('SYNC_SUMMARY_FILE', '.cache/sync-summary.md'),
+      // 0 = 关闭。负值一律归零（失败在关闭一侧：不限制时间/集数）。
+      timeBudgetMs: Math.max(0, Math.floor(envNumber('SYNC_TIME_BUDGET_MS', 0))),
+      maxEpisodesPerItem: Math.max(
+        0,
+        Math.floor(envNumber('SYNC_MAX_EPISODES_PER_ITEM', 0)),
+      ),
+      unmatchedRetryDays: Math.max(
+        0,
+        Math.floor(envNumber('SYNC_UNMATCHED_RETRY_DAYS', 7)),
+      ),
     },
   };
 }
@@ -321,12 +340,41 @@ export function describeSyncConfig(config: SyncConfig): string {
     }）`,
     `  年份容差: ${s.yearTolerance}（书籍: ${s.bookYearTolerance}）｜匹配严格: ${s.matchStrict ? 1 : 0}`,
     `  匹配审计: ${s.matchAuditFile}`,
+    `  时间预算: ${s.timeBudgetMs > 0 ? `${s.timeBudgetMs}ms` : '关闭'}` +
+      `｜单条分集上限: ${s.maxEpisodesPerItem > 0 ? s.maxEpisodesPerItem : '不限'}` +
+      `｜未匹配退避: ${s.unmatchedRetryDays > 0 ? `${s.unmatchedRetryDays} 天` : '关闭'}`,
   ].join('\n');
 }
 
 // ─── 增量状态 ───────────────────────────────────────────────────────────
 
-export type SyncState = Record<string, string>;
+/**
+ * 增量状态（内存形态）。
+ *
+ * - `marks`：uuid → 指纹，与 v1 文件完全同形，**不参与任何迁移**；
+ * - `targets`：uuid → 上次命中的 Bangumi subject，仅供诊断（清理错配时对照），
+ *   刻意不参与匹配判定——否则一次错配会被永久复用；
+ * - `progress`：uuid → `done`，表示该条的进度（书籍上限 / 分集）已拉满。
+ *   它的存在让「开进度拉满」不必再靠 `FULL_SYNC=1` 全量重跑。
+ */
+export type SyncState = {
+  marks: Record<string, string>;
+  targets: Record<string, number>;
+  progress: Record<string, 'done'>;
+};
+
+/** 落盘形态：v1 只有 `marks`，v2 追加两个可选字段，旧版本读新文件仍只取 `marks`。 */
+export type SyncStateFile = {
+  version: 2;
+  updatedAt: string;
+  marks: Record<string, string>;
+  targets?: Record<string, number>;
+  progress?: Record<string, 'done'>;
+};
+
+export function createSyncState(): SyncState {
+  return { marks: {}, targets: {}, progress: {} };
+}
 
 /** 条目指纹：书架状态、评分、短评、可见性任一变化都会改变指纹。 */
 export function fingerprintMark(mark: NeodbShelfMark): string {
@@ -345,24 +393,34 @@ export function fingerprintMark(mark: NeodbShelfMark): string {
 
 export function loadSyncState(path: string): SyncState {
   if (!existsSync(path)) {
-    return {};
+    return createSyncState();
   }
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { marks?: SyncState };
-    return parsed.marks ?? {};
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<SyncStateFile> & {
+      marks?: Record<string, string>;
+    };
+    // v1 文件只有 marks；缺失的 targets / progress 一律视为空，旧文件可直接用。
+    return {
+      marks: parsed.marks ?? {},
+      targets: parsed.targets ?? {},
+      progress: parsed.progress ?? {},
+    };
   } catch {
     consola.warn(`增量状态文件损坏，按空状态处理: ${path}`);
-    return {};
+    return createSyncState();
   }
 }
 
 export function saveSyncState(path: string, state: SyncState): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(
-    path,
-    JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), marks: state }),
-    'utf8',
-  );
+  const doc: SyncStateFile = {
+    version: 2,
+    updatedAt: new Date().toISOString(),
+    marks: state.marks,
+    targets: state.targets,
+    progress: state.progress,
+  };
+  writeFileSync(path, JSON.stringify(doc), 'utf8');
 }
 
 // ─── 全量游标 ───────────────────────────────────────────────────────────

@@ -62,6 +62,11 @@ async function main(): Promise<void> {
     `扫描 ${report.scanned}：写入 ${report.written}｜无变化 ${report.unchanged}｜` +
       `跳过 ${report.skipped}｜未匹配 ${report.unresolved}｜失败 ${report.failed}`,
   );
+  if (result.stopReason === 'time-budget') {
+    consola.warn('时间预算用尽，本轮提前收尾；已处理条目的状态已落盘。');
+  } else if (result.stopReason === 'max-items') {
+    consola.info('条目配额用尽，本轮正常收尾；下一轮从新增条目继续。');
+  }
   if (truncatedShelves.length) {
     consola.warn(`以下书架未遍历完整: ${truncatedShelves.join(', ')}`);
   }
@@ -80,12 +85,24 @@ async function main(): Promise<void> {
     truncatedShelves,
     unmatchedCount: result.unmatched.size,
     unmatchedByReason,
+    metrics: result.metrics,
+    stopReason: result.stopReason,
   });
 
   mkdirSync(dirname(config.sync.reportFile), { recursive: true });
   writeFileSync(
     config.sync.reportFile,
-    JSON.stringify({ startedAt, finishedAt, report }, null, 2),
+    JSON.stringify(
+      {
+        startedAt,
+        finishedAt,
+        report,
+        stopReason: result.stopReason,
+        metrics: result.metrics,
+      },
+      null,
+      2,
+    ),
     'utf8',
   );
   writeFileSync(config.sync.summaryFile, summary, 'utf8');
