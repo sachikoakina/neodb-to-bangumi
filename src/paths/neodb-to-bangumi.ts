@@ -304,7 +304,8 @@ export default async function runNeodbToBangumi(
     config.sync.fullSync && !config.sync.dryRun ? config.sync.fullSyncCursorFile : '';
   const cursor: FullSyncCursor = cursorPath ? loadFullSyncCursor(cursorPath) : {};
 
-  consola.info(`Bangumi 账号: ${me.nickname || me.username}`);
+  // 刻意不打印账号身份：昵称是跨平台身份锚点，进日志就能反查到该账号的全部
+  // 公开收藏与评论。凭据探测已在前面完成，这里没有需要回显的信息。
 
   // 配额按书架独立：每个书架从零开始，4 个书架合计最多 `4 × SYNC_MAX_ITEMS`。
   // 这样前一个书架吃满配额不会让后面的书架空转（旧实现是整轮共享一个计数器）。

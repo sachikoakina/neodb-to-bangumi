@@ -4,11 +4,7 @@
  */
 import { consola } from 'consola';
 import { neodbToken } from '../src/clients/neodb-http';
-import {
-  fetchShelfPage,
-  getNeodbMe,
-  verifyNeodbToken,
-} from '../src/clients/neodb-shelf';
+import { fetchShelfPage, verifyNeodbToken } from '../src/clients/neodb-shelf';
 import { extractBangumiSubjectId } from '../src/rules/neodb-bangumi-matching';
 import { displayName } from '../src/rules/neodb-display';
 import { SHELF_TYPES } from '../src/types';
@@ -24,8 +20,7 @@ async function main(): Promise<void> {
     process.exitCode = 2;
     return;
   }
-  const me = await getNeodbMe();
-  consola.info(`NeoDB 账号: ${me?.display_name || me?.username || '未知'}`);
+  // 刻意不打印 display_name / username：属于跨平台身份锚点，不写进日志。
 
   for (const shelfType of SHELF_TYPES) {
     const page = await fetchShelfPage({ shelfType, page: 1 });
