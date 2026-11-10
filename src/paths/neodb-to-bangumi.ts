@@ -70,7 +70,6 @@ import {
 } from '../rules/target-claim';
 import { isUpToDate, progressApplicable } from '../rules/progress-gate';
 import { timeBudgetExhausted, mergeStopReason, type StopReason } from '../rules/budget';
-import { nextCheckAt, shouldRecheck } from '../rules/recheck';
 import {
   categoryAllowed,
   createSyncState,
@@ -85,22 +84,19 @@ import {
 } from '../sync-config';
 import {
   createReport,
+  createUnmatchedEntry,
   dryRunUnmatchedPath,
   loadUnmatched,
-  pruneUnmatched,
   record,
   saveUnmatched,
-  upsertUnmatched,
   type MatchAuditEntry,
   type PathReport,
+  type RemovedEntry,
   type UnmatchedEntry,
+  type UnmatchedKind,
   type UnmatchedMap,
 } from '../sync-report';
-import {
-  summarizeUnmatchedRun,
-  zeroUnmatchedStats,
-  type UnmatchedRunStats,
-} from '../unmatched-report';
+import { mergeRounds } from '../rules/review-rounds';
 import type {
   BangumiSubject,
   NeodbItem,
@@ -133,21 +129,18 @@ type SyncContext = {
   /** 完整条目缓存（仅成功解析的）；用于年份与平台，失败下轮重试。 */
   subjectCache: Map<number, BangumiSubject>;
   targetClaims: Map<number, TargetClaim>;
-  unmatched: UnmatchedMap;
+  unmatched: UnmatchedEntry[];
   aborted: boolean;
   /** 本轮提前停止的原因：条目配额或时间预算；未触发为 null。 */
   stopReason: StopReason;
   /** 匹配审计：按处理顺序累积，运行结束统一落盘（含 dry-run）。 */
   matchAudit: MatchAuditEntry[];
-  /**
-   * 本轮真正进入遍历的条目 uuid（含被增量跳过的）。
-   *
-   * 只有靠它才能区分「名单里没解决」与「本轮压根没扫到」——后者是配额/页数
-   * 截断的产物，不该被读成新缺口。
-   */
-  seenUuids: Set<string>;
-  /** 本轮因成功导入而从名单移出的条数。 */
-  removedBySuccess: number;
+  /** 本轮真正检查过、且仍未导入的条目（按 uuid 索引）。 */
+  observed: UnmatchedMap;
+  /** 本轮因导入成功而移出的 uuid。 */
+  importedUuids: Set<string>;
+  /** 本轮完整遍历完毕的书架：只有它们能判定「未再出现」。 */
+  coveredShelves: Set<string>;
 };
 
 type MatchResult =
@@ -179,7 +172,18 @@ class AuthAbortError extends Error {}
 export type SyncRunResult = {
   aborted: false | 'neodb-auth' | 'bangumi-auth';
   report: PathReport;
-  unmatched: UnmatchedMap;
+  /** 合并后的全量名单（含仍在观察期的条目）。 */
+  unmatched: UnmatchedEntry[];
+  /** 名单正文：已越过观察窗。 */
+  unmatchedLive: UnmatchedEntry[];
+  /** 本轮首次越过观察窗。 */
+  unmatchedAdded: UnmatchedEntry[];
+  /** 本轮移出名单的条目与原因。 */
+  unmatchedRemoved: RemovedEntry[];
+  /** 仍在观察窗内。 */
+  unmatchedObserving: UnmatchedEntry[];
+  /** 本轮没进入扫描集合、因此冻结的条目。 */
+  unmatchedFrozen: UnmatchedEntry[];
   truncatedShelves: ShelfType[];
   matchAudit: MatchAuditEntry[];
   /** 本轮耗时与请求等待的观测快照；只用于诊断，不参与任何写入判定。 */
@@ -188,10 +192,6 @@ export type SyncRunResult = {
   stopReason: StopReason;
   /** 非 null 表示缓存状态被丢弃、本轮按空状态运行；用于在摘要里说明。 */
   stateReset: SyncStateDiscardReason | null;
-  /** 本轮与待核对名单有关的计数（新增/移除/观察中/未扫描）。 */
-  unmatchedStats: UnmatchedRunStats;
-  /** 本轮首次进入名单的条目（「本轮新增」小节用）。 */
-  unmatchedAdded: UnmatchedEntry[];
   /**
    * 本轮真正进入处理流程的条数；常规运行受 `SYNC_MAX_ITEMS` 限制。
    * 配额按书架独立，因此理论上限是 `书架数 × SYNC_MAX_ITEMS`。
@@ -210,8 +210,6 @@ export default async function runNeodbToBangumi(
   resetMetrics();
   const report = createReport();
   const unmatched = loadUnmatched(config.sync.unmatchedLog);
-  // 运行前的名单键：结束时的差集就是「本轮新增」，比在每个 upsert 处记账更不易漏。
-  const initialUnmatchedKeys = new Set(unmatched.keys());
   const truncatedShelves: ShelfType[] = [];
 
   // ── 凭据探测：认证失败中止链路，不带病运行 ──
@@ -221,13 +219,16 @@ export default async function runNeodbToBangumi(
       aborted: 'neodb-auth',
       report,
       unmatched,
+      unmatchedLive: [],
+      unmatchedAdded: [],
+      unmatchedRemoved: [],
+      unmatchedObserving: [],
+      unmatchedFrozen: [],
       truncatedShelves,
       matchAudit: [],
       metrics: metricsSnapshot(),
       stopReason: null,
       stateReset: null,
-      unmatchedStats: zeroUnmatchedStats(),
-      unmatchedAdded: [],
       quotaUsed: 0,
       cappedShelves: [],
       incrementalSkipped: 0,
@@ -239,13 +240,16 @@ export default async function runNeodbToBangumi(
       aborted: 'bangumi-auth',
       report,
       unmatched,
+      unmatchedLive: [],
+      unmatchedAdded: [],
+      unmatchedRemoved: [],
+      unmatchedObserving: [],
+      unmatchedFrozen: [],
       truncatedShelves,
       matchAudit: [],
       metrics: metricsSnapshot(),
       stopReason: null,
       stateReset: null,
-      unmatchedStats: zeroUnmatchedStats(),
-      unmatchedAdded: [],
       quotaUsed: 0,
       cappedShelves: [],
       incrementalSkipped: 0,
@@ -258,13 +262,16 @@ export default async function runNeodbToBangumi(
       aborted: 'bangumi-auth',
       report,
       unmatched,
+      unmatchedLive: [],
+      unmatchedAdded: [],
+      unmatchedRemoved: [],
+      unmatchedObserving: [],
+      unmatchedFrozen: [],
       truncatedShelves,
       matchAudit: [],
       metrics: metricsSnapshot(),
       stopReason: null,
       stateReset: null,
-      unmatchedStats: zeroUnmatchedStats(),
-      unmatchedAdded: [],
       quotaUsed: 0,
       cappedShelves: [],
       incrementalSkipped: 0,
@@ -295,8 +302,9 @@ export default async function runNeodbToBangumi(
     aborted: false,
     stopReason: null,
     matchAudit: [],
-    seenUuids: new Set(),
-    removedBySuccess: 0,
+    observed: new Map(),
+    importedUuids: new Set(),
+    coveredShelves: new Set(),
   };
 
   // 全量游标：只有正式的全量运行读写它；dry-run 不推进。
@@ -328,6 +336,9 @@ export default async function runNeodbToBangumi(
 
     // 每书架独立的配额计数器（对齐 Audiovisual-Transporter 的 shelf×category 预算）。
     let shelfQuotaUsed = 0;
+    // 主动停止（配额 / 时间预算 / 认证中止）时 walkShelfPages 仍返回 truncated=false，
+    // 因此必须自己记账：这类书架没有走完，不能参与「未再出现」的判定。
+    let stoppedEarly = false;
 
     const result = await walkShelfPages(
       shelfType,
@@ -342,9 +353,6 @@ export default async function runNeodbToBangumi(
         );
 
         for (const mark of ordered) {
-          // 见过集合必须在所有分支之前记账（含增量跳过）：名单里「本轮没扫到」
-          // 与「扫到了没解决」是两件事，配额截断不该被读成新缺口。
-          ctx.seenUuids.add(mark.item.uuid);
           // 增量跳过在配额判断之前：已同步条目既不计扫描配额，也不消耗条目预算。
           // 判定交给纯函数：除指纹外还要看「进度是否已拉满」——否则打开
           // SYNC_PROGRESS 后，历史上已记指纹的条目永远轮不到补分集。
@@ -375,6 +383,7 @@ export default async function runNeodbToBangumi(
                 `书架 ${shelfType} 达到 SYNC_MAX_ITEMS（${config.sync.maxItems}），` +
                   '结束本书架；其余书架继续。',
               );
+              stoppedEarly = true;
               return false;
             }
             if (
@@ -385,6 +394,7 @@ export default async function runNeodbToBangumi(
                 `时间预算用尽（${config.sync.timeBudgetMs}ms），本轮主动收尾；` +
                   `已处理条目的状态会正常落盘。`,
               );
+              stoppedEarly = true;
               return false;
             }
           }
@@ -402,6 +412,7 @@ export default async function runNeodbToBangumi(
           } catch (error) {
             if (error instanceof AuthAbortError) {
               ctx.aborted = true;
+              stoppedEarly = true;
               return false;
             }
             const detail = error instanceof Error ? error.message : String(error);
@@ -411,9 +422,7 @@ export default async function runNeodbToBangumi(
               reason: 'item-threw',
               error: truncateError(detail),
             });
-            recordUnmatched(ctx, mark, 'item-threw', displayName(mark.item), {
-              state: 'failed',
-            });
+            observeUnmatched(ctx, mark, 'failed', 'item-threw', displayName(mark.item));
             consola.error(
               `条目处理异常，继续下一条: ${displayName(mark.item)} — ${absoluteNeodbUrl(mark.item.url, ctx.config.neodb.baseUrl)}`,
               detail,
@@ -428,14 +437,13 @@ export default async function runNeodbToBangumi(
           }
           addItemTime(performance.now() - itemStartedAt);
           record(report, outcome);
-          // 已导入的条目当轮即移出名单：清单只列未导入项，不靠 30 天老化兜底。
+          // 已导入的条目当轮即移出名单：它不再是缺口，不该再等两轮缺席。
           // dry-run 的 written 只是计划，不能据此改写正式名单的视角。
           if (
             !config.sync.dryRun &&
-            (outcome === 'written' || outcome === 'unchanged') &&
-            ctx.unmatched.delete(mark.item.uuid)
+            (outcome === 'written' || outcome === 'unchanged')
           ) {
-            ctx.removedBySuccess += 1;
+            ctx.importedUuids.add(mark.item.uuid);
           }
         }
         return true;
@@ -463,6 +471,11 @@ export default async function runNeodbToBangumi(
       // 摘要因此不会把一次网络问题说成「调大 SYNC_MAX_ITEMS 就好」。
       ctx.stopReason = mergeStopReason(ctx.stopReason, 'partial-read');
     }
+    // 覆盖判定：从第一页走到底、且没被配额 / 时间预算 / 认证中止打断，才算走完。
+    // 只有走完的书架才允许把「没再上报」记成缺席。
+    if (startPage === 1 && !result.truncated && !stoppedEarly) {
+      ctx.coveredShelves.add(shelfType);
+    }
     // 每趟写一次状态：中断后最多重走一个书架的增量比较。
     if (ctx.stateDirty && !config.sync.dryRun) {
       saveSyncState(config.sync.stateFile, state);
@@ -470,57 +483,43 @@ export default async function runNeodbToBangumi(
     }
   }
 
-  let prunedRemoved = 0;
+  const merged = mergeRounds({
+    previous: unmatched,
+    observed: [...ctx.observed.values()],
+    coveredShelves: ctx.coveredShelves,
+    importedUuids: ctx.importedUuids,
+    now: new Date().toISOString(),
+  });
+
   if (!config.sync.dryRun) {
-    // 读取不完整必须冻结老化：没走到的条目否则会被当成「本轮未出现」而误删。
-    // 这与 Audiovisual-Transporter 的 `truncated → 冻结老化` 同一策略。
-    const freezeAgeing = truncatedShelves.length > 0;
-    if (freezeAgeing) {
-      consola.warn(
-        `本轮有书架未遍历完整（${truncatedShelves.join('、')}）：` +
-          '冻结待核对名单老化，避免把没走到的条目误判为已消失。',
-      );
-    }
-    // 清理必须发生在所有 upsert 之后：否则会把本轮刚刷新过 lastSeenAt 的条目误删。
-    const pruned = freezeAgeing
-      ? { entries: new Map(unmatched), removed: 0 }
-      : pruneUnmatched(unmatched, config.sync.reviewStateMaxAgeDays);
-    prunedRemoved = pruned.removed;
-    if (pruned.removed > 0) {
-      unmatched.clear();
-      for (const [key, value] of pruned.entries) {
-        unmatched.set(key, value);
-      }
-      consola.info(
-        `待核对名单清理：移除 ${pruned.removed} 条（超过 ${config.sync.reviewStateMaxAgeDays} 天未出现）`,
-      );
-    }
-    saveUnmatched(config.sync.unmatchedLog, unmatched);
+    saveUnmatched(config.sync.unmatchedLog, merged.entries);
   } else {
-    // dry-run 同样产出待核对名单：写派生文件，不老化、不污染正式文件。
+    // dry-run 同样产出名单：写派生文件，不污染正式文件。
     const dryRunPath = dryRunUnmatchedPath(config.sync.unmatchedLog);
-    saveUnmatched(dryRunPath, unmatched);
+    saveUnmatched(dryRunPath, merged.entries);
     consola.info(`dry-run 待核对名单（本轮视角）已写入: ${dryRunPath}`);
   }
+  if (merged.removed.length) {
+    consola.info(
+      `待核对名单移除 ${merged.removed.length} 条：` +
+        merged.removed.map((item) => `${item.entry.title}（${item.cause}）`).join('、'),
+    );
+  }
 
-  const unmatchedSummary = summarizeUnmatchedRun({
-    unmatched,
-    initialKeys: initialUnmatchedKeys,
-    seenUuids: ctx.seenUuids,
-    removedBySuccess: ctx.removedBySuccess,
-    prunedRemoved,
-  });
   return {
     aborted: ctx.aborted ? 'bangumi-auth' : false,
     report,
-    unmatched,
+    unmatched: merged.entries,
+    unmatchedLive: merged.live,
+    unmatchedAdded: merged.added,
+    unmatchedRemoved: merged.removed,
+    unmatchedObserving: merged.observing,
+    unmatchedFrozen: merged.frozen,
     truncatedShelves,
     matchAudit: ctx.matchAudit,
     metrics: metricsSnapshot(),
     stateReset: stateLoad.discarded,
     stopReason: ctx.stopReason,
-    unmatchedStats: unmatchedSummary.stats,
-    unmatchedAdded: unmatchedSummary.added,
     quotaUsed,
     incrementalSkipped,
     cappedShelves,
@@ -562,27 +561,6 @@ async function processMark(
     return finish('skipped', 'unsupported-category');
   }
 
-  // ── 未匹配退避：同一缺口不必每天重做一遍完整匹配 ──
-  // 有外链的条目永不退避：补链是人工介入，必须当轮生效，否则补了也看不到结果。
-  if (
-    config.sync.unmatchedRetryDays > 0 &&
-    extractBangumiSubjectId(item.external_resources) == null
-  ) {
-    const entry = ctx.unmatched.get(item.uuid);
-    // 失败条目只是记账，不进退避：把一次 5xx 推迟到下个窗口毫无意义。
-    if (
-      entry &&
-      entry.state !== 'failed' &&
-      !shouldRecheck(entry, new Date(), config.sync.unmatchedRetryDays)
-    ) {
-      consola.info(
-        `未匹配条目处于退避期，跳过网络匹配: uuid=${item.uuid} ` +
-          `next=${entry.nextCheckAt ?? '未记录'}（${label}）`,
-      );
-      return finish('unresolved', 'unmatched-backoff');
-    }
-  }
-
   // ── 匹配 ──
   const match = await timeStage('match', () => resolveMatch(item, ctx));
   if (match.kind === 'failed') {
@@ -592,12 +570,11 @@ async function processMark(
     consola.warn(
       `匹配失败，记 failed（下轮可重试）: uuid=${item.uuid} ${match.reason} ${label}`,
     );
-    // 落名单只为了「已存在 N 天」：failed 状态会清掉退避，下轮照常重试。
-    recordUnmatched(ctx, mark, match.reason, label, { state: 'failed' });
+    observeUnmatched(ctx, mark, 'failed', match.reason, label);
     return finish('failed', match.reason);
   }
   if (match.kind === 'unresolved') {
-    recordUnmatched(ctx, mark, match.reason, label, { state: 'unresolved' });
+    observeUnmatched(ctx, mark, 'unresolved', match.reason, label);
     consola.info(
       `未匹配 Bangumi 条目（${match.reason}），记入待核对: uuid=${item.uuid} ${label}`,
     );
@@ -627,17 +604,8 @@ async function processMark(
   };
   const incumbent = ctx.targetClaims.get(subjectId);
   if (incumbent && shouldSkipClaim(incumbent, claim)) {
-    upsertUnmatched(ctx.unmatched, item.uuid, {
-      reason: 'duplicate-target',
-      title: label,
-      itemUrl: absoluteNeodbUrl(item.url, ctx.config.neodb.baseUrl),
-      category: item.category,
-      shelf: String(mark.shelf_type),
-      neodbUuid: item.uuid,
-      // 让位给更强认领者：列入清单但不带退避，本条目下轮仍会重新裁决。
-      state: 'skipped',
-      subjectId,
-    });
+    // 让位给更强认领者：本条目下轮仍会重新裁决。
+    observeUnmatched(ctx, mark, 'skipped', 'duplicate-target', label, subjectId);
     consola.info(
       `重复目标，保留更强认领: subject/${subjectId} ` +
         `kept=${incumbent.neodbUuid}(${incumbent.via},${incumbent.shelfType}) ` +
@@ -651,10 +619,7 @@ async function processMark(
     getBangumiCollection(ctx.username, subjectId),
   );
   if (existingRes.status === 'error') {
-    recordUnmatched(ctx, mark, 'target-read-failed', label, {
-      state: 'failed',
-      subjectId,
-    });
+    observeUnmatched(ctx, mark, 'failed', 'target-read-failed', label, subjectId);
     return finish('failed', 'target-read-failed', existingRes.message);
   }
   const existing = existingRes.status === 'found' ? existingRes.value : null;
@@ -730,10 +695,7 @@ async function processMark(
       readSubjectCached(subjectId, ctx.subjectCache),
     );
     if (subjectRes.status !== 'found') {
-      recordUnmatched(ctx, mark, 'subject-read-failed', label, {
-        state: 'failed',
-        subjectId,
-      });
+      observeUnmatched(ctx, mark, 'failed', 'subject-read-failed', label, subjectId);
       return finish(
         'failed',
         'subject-read-failed',
@@ -810,10 +772,14 @@ async function processMark(
       // 自愈，因此转待核对留人处理，且**不**判 failed —— 否则一条坏数据会让
       // 每晚的定时任务固定变红，红灯彻底失去区分度。
       if (write.kind === 'not-found') {
-        recordUnmatched(ctx, mark, 'collection-not-found', label, {
-          state: 'unresolved',
+        observeUnmatched(
+          ctx,
+          mark,
+          'unresolved',
+          'collection-not-found',
+          label,
           subjectId,
-        });
+        );
         consola.warn(
           `目标不可收藏，转待核对: subject/${subjectId} uuid=${item.uuid} ` +
             `${write.message}（${label}）`,
@@ -824,10 +790,14 @@ async function processMark(
           truncateError(write.message),
         );
       }
-      recordUnmatched(ctx, mark, 'collection-write-failed', label, {
-        state: 'failed',
+      observeUnmatched(
+        ctx,
+        mark,
+        'failed',
+        'collection-write-failed',
+        label,
         subjectId,
-      });
+      );
       return finish('failed', 'collection-write-failed', truncateError(write.message));
     }
     consola.info(
@@ -872,10 +842,14 @@ async function processMark(
       `写入未完成: subject/${subjectId} reason=${decision.reason ?? 'unknown'}` +
         `${message ? ` ${message}` : ''}（${label}）`,
     );
-    recordUnmatched(ctx, mark, decision.reason ?? 'collection-write-failed', label, {
-      state: 'failed',
+    observeUnmatched(
+      ctx,
+      mark,
+      'failed',
+      decision.reason ?? 'collection-write-failed',
+      label,
       subjectId,
-    });
+    );
     return finish('failed', decision.reason, message);
   }
 
@@ -998,31 +972,35 @@ function toProgressSignal(result: EpisodeProgressResult): ProgressSignal {
   }
 }
 
-function recordUnmatched(
+/**
+ * 记录一条「本轮检查过、但没导入成功」的条目。
+ *
+ * 只写本轮观察集；是否进名单、是否算缺席、是否移出，全部交给结尾的
+ * `mergeRounds` 一次判定 —— 遍历过程中就地改名单会把「没检查」和
+ * 「检查了没出现」混成同一种事实。
+ */
+function observeUnmatched(
   ctx: SyncContext,
   mark: NeodbShelfMark,
+  kind: UnmatchedKind,
   reason: string,
   label: string,
-  options: {
-    state?: 'unresolved' | 'skipped' | 'failed';
-    subjectId?: number;
-  } = {},
+  subjectId?: number,
 ): void {
-  const previous = ctx.unmatched.get(mark.item.uuid);
-  const attempts = (previous?.attempts ?? 0) + 1;
-  const next = nextCheckAt(attempts, new Date(), ctx.config.sync.unmatchedRetryDays);
-  upsertUnmatched(ctx.unmatched, mark.item.uuid, {
-    reason,
-    title: label,
-    itemUrl: absoluteNeodbUrl(mark.item.url, ctx.config.neodb.baseUrl),
-    category: String(mark.item.category),
-    shelf: String(mark.shelf_type),
-    neodbUuid: mark.item.uuid,
-    attempts,
-    ...(options.state != null ? { state: options.state } : {}),
-    ...(options.subjectId != null ? { subjectId: options.subjectId } : {}),
-    ...(next ? { nextCheckAt: next } : {}),
-  });
+  ctx.observed.set(
+    mark.item.uuid,
+    createUnmatchedEntry({
+      kind,
+      reason,
+      title: label,
+      itemUrl: absoluteNeodbUrl(mark.item.url, ctx.config.neodb.baseUrl),
+      category: String(mark.item.category),
+      shelf: String(mark.shelf_type),
+      neodbUuid: mark.item.uuid,
+      ...(subjectId != null ? { subjectId } : {}),
+      now: new Date().toISOString(),
+    }),
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────

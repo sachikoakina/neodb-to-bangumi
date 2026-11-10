@@ -54,12 +54,10 @@ export const ENV_KEYS: readonly string[] = [
   'FULL_SYNC',
   'FULL_SYNC_CURSOR_FILE',
   'SYNC_UNMATCHED_LOG',
-  'REVIEW_STATE_MAX_AGE_DAYS',
   'SYNC_REPORT_FILE',
   'SYNC_SUMMARY_FILE',
   'SYNC_TIME_BUDGET_MS',
   'SYNC_MAX_EPISODES_PER_ITEM',
-  'SYNC_UNMATCHED_RETRY_DAYS',
   'SYNC_FAIL_ON_ITEM_ERRORS',
 ];
 
@@ -218,16 +216,12 @@ export type SyncConfig = {
     fullSync: boolean;
     fullSyncCursorFile: string;
     unmatchedLog: string;
-    /** 待核对名单按 lastSeenAt 老化的天数；0 表示永不清理。 */
-    reviewStateMaxAgeDays: number;
     reportFile: string;
     summaryFile: string;
     /** 单轮时间预算（毫秒）；0 表示不限制。仅常规运行生效。 */
     timeBudgetMs: number;
     /** 单条每轮最多写入的分集数；0 表示不限。 */
     maxEpisodesPerItem: number;
-    /** 未匹配条目的退避上限天数；0 表示不避让，每轮都重试。 */
-    unmatchedRetryDays: number;
     /**
      * 严格退出码：有条目失败就把进程判红。
      *
@@ -305,10 +299,6 @@ export function loadSyncConfig(): SyncConfig {
         '.cache/full-sync-cursor.json',
       ),
       unmatchedLog: envString('SYNC_UNMATCHED_LOG', '.cache/unmatched.json'),
-      reviewStateMaxAgeDays: Math.max(
-        0,
-        Math.floor(envNumber('REVIEW_STATE_MAX_AGE_DAYS', 30)),
-      ),
       reportFile: envString('SYNC_REPORT_FILE', '.cache/sync-report.json'),
       summaryFile: envString('SYNC_SUMMARY_FILE', '.cache/sync-summary.md'),
       // 0 = 关闭。负值一律归零（失败在关闭一侧：不限制时间/集数）。
@@ -316,10 +306,6 @@ export function loadSyncConfig(): SyncConfig {
       maxEpisodesPerItem: Math.max(
         0,
         Math.floor(envNumber('SYNC_MAX_EPISODES_PER_ITEM', 0)),
-      ),
-      unmatchedRetryDays: Math.max(
-        0,
-        Math.floor(envNumber('SYNC_UNMATCHED_RETRY_DAYS', 7)),
       ),
       // 默认宽松：条目失败只告警不判红，避免单条坏数据让定时任务永久红。
       failOnItemErrors: envEnabled('SYNC_FAIL_ON_ITEM_ERRORS', false),
@@ -348,16 +334,11 @@ export function describeSyncConfig(config: SyncConfig): string {
       `｜进度拉满: ${s.progress ? 1 : 0}（SP: ${s.includeSp ? 1 : 0}，OP/ED: ${s.includeOpEd ? 1 : 0}）`,
     `  增量: ${s.incremental && !s.fullSync ? 1 : 0}｜状态文件: ${s.stateFile}`,
     `  全量游标: ${s.fullSync ? s.fullSyncCursorFile : '未启用（仅 FULL_SYNC=1 使用）'}`,
-    `  待核对名单: ${s.unmatchedLog}（${
-      s.reviewStateMaxAgeDays > 0
-        ? `${s.reviewStateMaxAgeDays} 天未出现后清理`
-        : '永不清理'
-    }）`,
+    `  待核对名单: ${s.unmatchedLog}（连续两轮被检查到却未再出现时移出）`,
     `  年份容差: ${s.yearTolerance}（书籍: ${s.bookYearTolerance}）｜匹配严格: ${s.matchStrict ? 1 : 0}`,
     `  匹配审计: ${s.matchAuditFile}`,
     `  时间预算: ${s.timeBudgetMs > 0 ? `${s.timeBudgetMs}ms` : '关闭'}` +
-      `｜单条分集上限: ${s.maxEpisodesPerItem > 0 ? s.maxEpisodesPerItem : '不限'}` +
-      `｜未匹配退避: ${s.unmatchedRetryDays > 0 ? `${s.unmatchedRetryDays} 天` : '关闭'}`,
+      `｜单条分集上限: ${s.maxEpisodesPerItem > 0 ? s.maxEpisodesPerItem : '不限'}`,
     `  条目失败判红: ${s.failOnItemErrors ? 1 : 0}（0 = 只告警，1 = 严格退出码）`,
   ].join('\n');
 }

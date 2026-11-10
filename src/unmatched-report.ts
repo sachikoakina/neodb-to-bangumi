@@ -1,28 +1,14 @@
 /**
- * 待核对清单渲染 —— 把名单按「链路 → 状态 → 分类 → 书架」四级分组逐条列出。
+ * 待核对清单渲染 —— 把名单按「链路 → 结局 → 分类 → 书架」四级分组逐条列出。
  *
  * 与 `rules/*` 同样的理由：排版属于纯函数，可以离线断言。摘要长什么样不应该
  * 只有跑完一次真实同步才知道。
+ *
+ * 差量块（本轮新增 / 本轮移除 / 观察中）在正文之前：它们说明「这一轮变了什么」，
+ * 正文说明「现在还剩什么」。
  */
 import { absoluteNeodbUrl, DEFAULT_NEODB_BASE_URL } from './rules/neodb-display';
-import type { UnmatchedEntry } from './sync-report';
-
-/** 名单条目的三种状态。`skipped` 只用于「真的没导入」的跳过（如被更强认领者挤掉）。 */
-export type UnmatchedState = 'unresolved' | 'skipped' | 'failed';
-
-/** 本轮与名单有关的计数。 */
-export type UnmatchedRunStats = {
-  /** 名单合计。 */
-  total: number;
-  /** 本轮首次进入名单。 */
-  added: number;
-  /** 本轮移出：成功导入 + 老化清理。 */
-  removed: number;
-  /** 本轮之前就在名单里、仍未解决。 */
-  observed: number;
-  /** 名单里本轮没进入扫描集合（配额截断 / 分页上限 / 链路未运行）。 */
-  notScanned: number;
-};
+import type { RemovedEntry, UnmatchedEntry, UnmatchedKind } from './sync-report';
 
 export type UnmatchedShelfGroup = { label: string; entries: UnmatchedEntry[] };
 export type UnmatchedCategoryGroup = {
@@ -30,15 +16,15 @@ export type UnmatchedCategoryGroup = {
   count: number;
   shelves: UnmatchedShelfGroup[];
 };
-export type UnmatchedStateGroup = {
-  state: UnmatchedState;
+export type UnmatchedKindGroup = {
+  kind: UnmatchedKind;
   count: number;
   categories: UnmatchedCategoryGroup[];
 };
 export type UnmatchedLinkGroup = {
   link: string;
   count: number;
-  states: UnmatchedStateGroup[];
+  kinds: UnmatchedKindGroup[];
 };
 
 export type RenderUnmatchedMeta = {
@@ -46,17 +32,19 @@ export type RenderUnmatchedMeta = {
   startedAt: string;
   /** 「已存在 N 天」的参照时刻。 */
   now: Date;
-  stats: UnmatchedRunStats;
-  /** 本轮首次进入名单的条目，用于「本轮新增」小节。 */
-  addedEntries?: readonly UnmatchedEntry[];
+  /** 本轮首次越过观察窗的条目。 */
+  added?: readonly UnmatchedEntry[];
+  /** 本轮移出名单的条目与原因。 */
+  removed?: readonly RemovedEntry[];
+  /** 仍在观察窗内、尚未进入正文的条目。 */
+  observing?: readonly UnmatchedEntry[];
+  /** 本轮没进入扫描集合、因此冻结的条目。 */
+  frozen?: readonly UnmatchedEntry[];
   /** 未遍历完整的书架；为空时不渲染「无法归属」段。 */
   truncatedShelves?: readonly string[];
   /** 链路名；当前只有一条，留作扩展。 */
   link?: string;
-  /**
-   * NeoDB 实例地址，用于把历史名单里的站内相对链接（`/movie/xxx`）补成绝对地址。
-   * 不传时由 `absoluteNeodbUrl` 回退官方域名。
-   */
+  /** NeoDB 实例地址，用于把名单里的站内相对链接补成绝对地址。 */
   neodbBaseUrl?: string;
 };
 
@@ -77,6 +65,12 @@ export const SHELF_LABELS: Readonly<Record<string, string>> = {
   dropped: '搁置',
 };
 
+/** 移除原因的用户可读说明。 */
+export const REMOVAL_LABELS: Readonly<Record<RemovedEntry['cause'], string>> = {
+  imported: '已导入',
+  absent: '连续两轮未再出现',
+};
+
 const UNKNOWN_CATEGORY = '未分类';
 const UNKNOWN_SHELF = '未标注';
 const DEFAULT_LINK = 'NeoDB → Bangumi';
@@ -84,7 +78,7 @@ const DAY_MS = 86_400_000;
 const SHANGHAI_OFFSET_MS = 8 * 3_600_000;
 
 /** 固定顺序：同一份名单每次渲染结果一致，Job Summary 才可 diff。 */
-const STATE_ORDER: readonly UnmatchedState[] = ['unresolved', 'skipped', 'failed'];
+const KIND_ORDER: readonly UnmatchedKind[] = ['unresolved', 'skipped', 'failed'];
 const CATEGORY_ORDER: readonly string[] = [
   'book',
   'movie',
@@ -95,23 +89,6 @@ const CATEGORY_ORDER: readonly string[] = [
   'performance',
 ];
 const SHELF_ORDER: readonly string[] = ['wishlist', 'progress', 'complete', 'dropped'];
-
-/**
- * 历史条目没有 `state` 字段：这些原因本质是「被规则跳过」，不是待补的缺口，
- * 按 skipped 归类；其余一律 unresolved。新增 reason 默认落 unresolved。
- */
-const SKIPPED_REASONS: ReadonlySet<string> = new Set([
-  'duplicate-target',
-  'unmatched-backoff',
-  'hold-protected',
-  'unknown-shelf-type',
-  'category-not-allowed',
-  'unsupported-category',
-]);
-
-export function stateOf(entry: UnmatchedEntry): UnmatchedState {
-  return entry.state ?? (SKIPPED_REASONS.has(entry.reason) ? 'skipped' : 'unresolved');
-}
 
 export function categoryLabel(category: string | undefined): string {
   if (!category) return UNKNOWN_CATEGORY;
@@ -154,7 +131,7 @@ function orderOf(order: readonly string[], value: string): number {
 
 function compareEntries(a: UnmatchedEntry, b: UnmatchedEntry): number {
   const byTitle = a.title.localeCompare(b.title, 'zh');
-  return byTitle !== 0 ? byTitle : (a.neodbUuid ?? '').localeCompare(b.neodbUuid ?? '');
+  return byTitle !== 0 ? byTitle : a.neodbUuid.localeCompare(b.neodbUuid);
 }
 
 /**
@@ -165,23 +142,21 @@ export function groupUnmatched(
   entries: readonly UnmatchedEntry[],
   link: string = DEFAULT_LINK,
 ): UnmatchedLinkGroup[] {
-  const byState = new Map<UnmatchedState, Map<string, Map<string, UnmatchedEntry[]>>>();
+  const byKind = new Map<UnmatchedKind, Map<string, Map<string, UnmatchedEntry[]>>>();
   for (const entry of entries) {
-    const state = stateOf(entry);
     const category = entry.category ?? '';
-    const shelf = entry.shelf ?? '';
-    const categories = byState.get(state) ?? new Map();
-    byState.set(state, categories);
+    const categories = byKind.get(entry.kind) ?? new Map();
+    byKind.set(entry.kind, categories);
     const shelves = categories.get(category) ?? new Map();
     categories.set(category, shelves);
-    const bucket = shelves.get(shelf) ?? [];
-    shelves.set(shelf, bucket);
+    const bucket = shelves.get(entry.shelf) ?? [];
+    shelves.set(entry.shelf, bucket);
     bucket.push(entry);
   }
 
-  const states: UnmatchedStateGroup[] = [...byState.entries()]
-    .sort(([a], [b]) => orderOf(STATE_ORDER, a) - orderOf(STATE_ORDER, b))
-    .map(([state, categories]) => {
+  const kinds: UnmatchedKindGroup[] = [...byKind.entries()]
+    .sort(([a], [b]) => orderOf(KIND_ORDER, a) - orderOf(KIND_ORDER, b))
+    .map(([kind, categories]) => {
       const categoryGroups: UnmatchedCategoryGroup[] = [...categories.entries()]
         .sort(([a], [b]) => orderOf(CATEGORY_ORDER, a) - orderOf(CATEGORY_ORDER, b))
         .map(([category, shelves]) => {
@@ -198,54 +173,41 @@ export function groupUnmatched(
           };
         });
       return {
-        state,
+        kind,
         count: categoryGroups.reduce((sum, group) => sum + group.count, 0),
         categories: categoryGroups,
       };
     });
 
-  if (!states.length) return [];
+  if (!kinds.length) return [];
   return [
     {
       link,
-      count: states.reduce((sum, group) => sum + group.count, 0),
-      states,
+      count: kinds.reduce((sum, group) => sum + group.count, 0),
+      kinds,
     },
   ];
 }
 
-/** 本轮统计：新增用「运行前的名单键」做差，避免在每条 upsert 处记账。 */
-export function summarizeUnmatchedRun(input: {
-  unmatched: ReadonlyMap<string, UnmatchedEntry>;
-  initialKeys: ReadonlySet<string>;
-  seenUuids: ReadonlySet<string>;
-  removedBySuccess: number;
-  prunedRemoved: number;
-}): { stats: UnmatchedRunStats; added: UnmatchedEntry[] } {
-  const addedKeys = [...input.unmatched.keys()].filter(
-    (key) => !input.initialKeys.has(key),
-  );
-  const notScanned = [...input.unmatched.keys()].filter(
-    (key) => !input.seenUuids.has(key),
-  ).length;
-  const total = input.unmatched.size;
-  const added = addedKeys
-    .map((key) => input.unmatched.get(key))
-    .filter((entry): entry is UnmatchedEntry => entry != null);
-  return {
-    stats: {
-      total,
-      added: added.length,
-      removed: input.removedBySuccess + input.prunedRemoved,
-      observed: total - added.length,
-      notScanned,
-    },
-    added,
-  };
+function entryUrl(entry: UnmatchedEntry, baseUrl: string): string {
+  return absoluteNeodbUrl(entry.itemUrl, baseUrl) || '（无链接）';
 }
 
-export function zeroUnmatchedStats(): UnmatchedRunStats {
-  return { total: 0, added: 0, removed: 0, observed: 0, notScanned: 0 };
+function reasonText(entry: UnmatchedEntry): string {
+  return entry.subjectId == null
+    ? entry.reason
+    : `${entry.reason}(subject/${entry.subjectId})`;
+}
+
+/**
+ * 差量块的条目行：`名称 — 链接 · reason`。
+ *
+ * 移除的条目只有名字加删除线，链接保持可点 —— 「它真的匹配上了吗」正是移除
+ * 会引出的那个问题。观察期条目没有序号：它们还不是待办。
+ */
+function diffLine(entry: UnmatchedEntry, baseUrl: string, strike = false): string {
+  const name = strike ? `~~${entry.title}~~` : entry.title;
+  return `${name} — ${entryUrl(entry, baseUrl)} · ${reasonText(entry)}`;
 }
 
 function renderEntryLine(
@@ -254,20 +216,16 @@ function renderEntryLine(
   now: Date,
   baseUrl: string,
 ): string {
-  const reason =
-    entry.subjectId == null
-      ? entry.reason
-      : `${entry.reason}(subject/${entry.subjectId})`;
   const days = daysSince(entry.firstSeenAt, now);
   const age = days == null ? '已存在天数未知' : `已存在 ${days} 天`;
-  const url = absoluteNeodbUrl(entry.itemUrl, baseUrl) || '（无链接）';
-  return ` ${index}. ${entry.title} — ${url} · ${reason} · ${age}`;
+  return ` ${index}. ${entry.title} — ${entryUrl(entry, baseUrl)} · ${reasonText(entry)} · ${age}`;
 }
 
 /**
  * 渲染整段「待核对清单」。
  *
- * 输出只含**未导入**条目：成功写入的条目在运行期就被移出名单，这里不做二次过滤。
+ * 正文只含越过观察窗的条目；观察期条目单独成块，避免读者把「刚出现一轮的失败」
+ * 当成已确认的缺口。
  */
 export function renderUnmatchedSection(
   entries: readonly UnmatchedEntry[],
@@ -275,23 +233,27 @@ export function renderUnmatchedSection(
 ): string[] {
   const link = meta.link ?? DEFAULT_LINK;
   const baseUrl = meta.neodbBaseUrl?.trim() || DEFAULT_NEODB_BASE_URL;
-  const { stats } = meta;
+  const added = meta.added ?? [];
+  const removed = meta.removed ?? [];
+  const observing = meta.observing ?? [];
+  const frozen = meta.frozen ?? [];
   const lines: string[] = [];
-  lines.push(`## 待核对名单（${stats.total} 条）`);
+
+  lines.push(`## 待核对名单（${entries.length} 条）`);
   lines.push('');
   lines.push(
     `本轮运行（UTC）：${meta.startedAt}（上海时间为${formatShanghai(meta.startedAt)}）`,
   );
   lines.push('');
   lines.push(
-    `新增 ${stats.added} · 移除 ${stats.removed} · 观察中 ${stats.observed} · ` +
-      `名单合计 ${stats.total}`,
+    `新增 ${added.length} · 移除 ${removed.length} · 观察中 ${observing.length} · ` +
+      `名单合计 ${entries.length}`,
   );
 
-  if (stats.notScanned > 0) {
+  if (frozen.length) {
     lines.push('');
     lines.push(
-      `本轮有 ${stats.notScanned} 条不在扫描集合里（配额截断、分页上限或链路未运行），` +
+      `本轮有 ${frozen.length} 条不在扫描集合里（配额截断、分页上限或链路未运行），` +
         '已保留、不计缺席。',
     );
   }
@@ -305,35 +267,53 @@ export function renderUnmatchedSection(
     );
   }
 
+  if (added.length) {
+    lines.push('');
+    lines.push(`**本轮新增（${added.length}）**`);
+    lines.push('');
+    for (const entry of added) {
+      lines.push(`${diffLine(entry, baseUrl)}（${link}）`);
+    }
+  }
+
+  if (removed.length) {
+    const absentOnly = removed.every((item) => item.cause === 'absent');
+    lines.push('');
+    lines.push(
+      absentOnly
+        ? `**本轮移除（${removed.length}，连续两轮被扫描到且未再出现）**`
+        : `**本轮移除（${removed.length}）**`,
+    );
+    lines.push('');
+    for (const item of removed) {
+      lines.push(
+        `${diffLine(item.entry, baseUrl, true)} · ${REMOVAL_LABELS[item.cause]}`,
+      );
+    }
+  }
+
+  if (observing.length) {
+    lines.push('');
+    lines.push(`**观察中（${observing.length}，下一轮仍出现才入名单）**`);
+    lines.push('');
+    for (const entry of observing) {
+      lines.push(diffLine(entry, baseUrl));
+    }
+  }
+
   if (!entries.length) {
     lines.push('');
     lines.push('本轮无待核对条目。');
     return lines;
   }
 
-  const added = meta.addedEntries ?? [];
-  if (added.length) {
-    lines.push('');
-    lines.push(`本轮新增（${added.length}）`);
-    lines.push('');
-    for (const entry of added) {
-      const reason =
-        entry.subjectId == null
-          ? entry.reason
-          : `${entry.reason}(subject/${entry.subjectId})`;
-      lines.push(
-        `${stateOf(entry)} ${entry.title} — ${absoluteNeodbUrl(entry.itemUrl, baseUrl) || '（无链接）'} · ${reason}（${link}）`,
-      );
-    }
-  }
-
   for (const group of groupUnmatched(entries, link)) {
     lines.push('');
     lines.push(`### ${group.link}（${group.count}）`);
-    for (const stateGroup of group.states) {
+    for (const kindGroup of group.kinds) {
       lines.push('');
-      lines.push(`#### ${stateGroup.state}（${stateGroup.count}）`);
-      for (const category of stateGroup.categories) {
+      lines.push(`#### ${kindGroup.kind}（${kindGroup.count}）`);
+      for (const category of kindGroup.categories) {
         lines.push('');
         lines.push(`**${category.label}（${category.count}）**`);
         for (const shelf of category.shelves) {

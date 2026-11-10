@@ -78,8 +78,6 @@ jobs:
       SYNC_TIME_BUDGET_MS: ${{ vars.SYNC_TIME_BUDGET_MS || '0' }}
       # 单条分集上限：0 = 不限；设小可让长番分多轮补齐。
       SYNC_MAX_EPISODES_PER_ITEM: ${{ vars.SYNC_MAX_EPISODES_PER_ITEM || '0' }}
-      # 未匹配条目退避上限天数；0 = 每轮都重试。
-      SYNC_UNMATCHED_RETRY_DAYS: ${{ vars.SYNC_UNMATCHED_RETRY_DAYS || '7' }}
       # 条目级失败是否判红：默认 0，单条数据问题不再让定时任务永久红；
       # 需要「有失败即红」时把仓库 Variable 设为 1。认证中止 / 报告异常仍判红。
       SYNC_FAIL_ON_ITEM_ERRORS: ${{ vars.SYNC_FAIL_ON_ITEM_ERRORS || '0' }}
@@ -92,8 +90,6 @@ jobs:
       FULL_SYNC_CURSOR_FILE: ${{ vars.FULL_SYNC_CURSOR_FILE || '.cache/full-sync-cursor.json' }}
       # 未匹配清单：跨轮恢复后在原文件上 upsert，并以 review-state-*-stock artifact 长期保留。
       SYNC_UNMATCHED_LOG: ${{ vars.SYNC_UNMATCHED_LOG || '.cache/unmatched.json' }}
-      # 只按 lastSeenAt 老化，不按「本轮未出现」淘汰；0 表示永不清理。
-      REVIEW_STATE_MAX_AGE_DAYS: ${{ vars.REVIEW_STATE_MAX_AGE_DAYS || '30' }}
       SYNC_REPORT_FILE: ${{ vars.SYNC_REPORT_FILE || '.cache/sync-report.json' }}
       SYNC_SUMMARY_FILE: ${{ vars.SYNC_SUMMARY_FILE || '.cache/sync-summary.md' }}
       # 匹配审计：每条目的匹配对象、证据与结局，错配可离线复核。

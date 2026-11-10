@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { consola } from 'consola';
 import type { RunMetricsSnapshot, StageName } from './metrics';
-import { renderUnmatchedSection, type UnmatchedRunStats } from './unmatched-report';
+import { renderUnmatchedSection } from './unmatched-report';
 import type { StopReason } from './rules/budget';
 import type { ShelfType, SyncStateDiscardReason } from './types';
 
@@ -47,164 +47,131 @@ export function assertReportInvariant(report: PathReport): boolean {
 
 // ─── 待核对名单 ─────────────────────────────────────────────────────────
 
+/** 条目结局。观察窗轮数按 kind 取值，见 `rules/review-rounds.ts`。 */
+export type UnmatchedKind = 'unresolved' | 'skipped' | 'failed';
+
 export type UnmatchedEntry = {
   source: 'neodb-bangumi';
+  kind: UnmatchedKind;
   reason: string;
   title: string;
+  /** 绝对地址。 */
   itemUrl: string;
   /** 分类与书架元数据：人工核对时无需回查 NeoDB。 */
   category?: string;
-  shelf?: string;
-  neodbUuid?: string;
-  firstSeenAt: string;
-  lastSeenAt: string;
-  /** 累计未命中次数，驱动退避阶梯（1/2/4/7 天）。 */
-  attempts?: number;
-  /** 下次允许重新发起匹配的时间（ISO）；缺失表示立即可查。 */
-  nextCheckAt?: string;
-  /**
-   * 条目当前状态。旧文件缺这个字段时按 reason 推导（见 `unmatched-report.ts`），
-   * 因此历史名单不需要迁移。
-   *
-   * - `unresolved`：数据缺口（搜不到、年份对不上、目标不可收藏）；
-   * - `skipped`：被规则让位（如同一目标被更强标记认领）；
-   * - `failed`：技术失败（5xx/超时），下轮重试，不受退避限制。
-   */
-  state?: 'unresolved' | 'skipped' | 'failed';
+  /** 书架类型：缺席判定看它所在书架本轮是否完整遍历。 */
+  shelf: string;
+  neodbUuid: string;
   /** 已知的 Bangumi 目标（`duplicate-target` / `collection-not-found` 才有）。 */
   subjectId?: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  /** 连续「被检查到且仍在上报」的轮数，决定是否越过观察窗。 */
+  seenRounds: number;
+  /** 连续「被检查到但未再上报」的轮数，达到上限即移出名单。 */
+  missedRounds: number;
+};
+
+/** 本轮移出名单的条目与原因。 */
+export type RemovedEntry = {
+  entry: UnmatchedEntry;
+  cause: 'imported' | 'absent';
 };
 
 export type UnmatchedMap = Map<string, UnmatchedEntry>;
 
-/**
- * upsert 而非追加：同一条目再次未命中只刷新 `lastSeenAt`，`firstSeenAt` 不动，
- * 文件保持在唯一集合的规模，长期缺口与新出现缺口仍可区分。
- */
-export function upsertUnmatched(
-  entries: UnmatchedMap,
-  key: string,
-  detail: {
-    reason: string;
-    title: string;
-    itemUrl: string;
-    category?: string;
-    shelf?: string;
-    neodbUuid?: string;
-    /** 累计尝试次数；传入则覆盖旧值。 */
-    attempts?: number;
-    /** 下次允许复查时间；传入则覆盖旧值。 */
-    nextCheckAt?: string;
-    /** 条目状态；传入则覆盖旧值。`failed` 会清掉残留的退避时间。 */
-    state?: 'unresolved' | 'skipped' | 'failed';
-    /** 已知的 Bangumi 目标；传入则覆盖旧值。 */
-    subjectId?: number;
-    /**
-     * 是否刷新 `lastSeenAt`，默认 true。
-     * 退避期内不会走到这里；保留该开关是为了让「跳过网络但仍视为本轮见过」
-     * 这类用法不必伪造一次 upsert。
-     */
-    refreshLastSeen?: boolean;
-  },
-): void {
-  const now = new Date().toISOString();
-  const existing = entries.get(key);
-  if (existing) {
-    existing.reason = detail.reason;
-    // 展示字段每次都用调用方重新归一后的值覆盖：历史名单里可能存着英文原名或
-    // 站内相对链接，重跑时必须自愈成「首个本地化名 + 绝对地址」，否则旧值会
-    // 被这份持久状态一直带进摘要（渲染层只能补链接，补不回本地化名）。
-    existing.title = detail.title;
-    existing.itemUrl = detail.itemUrl;
-    if (detail.refreshLastSeen !== false) {
-      existing.lastSeenAt = now;
-    }
-    if (detail.state != null) existing.state = detail.state;
-    if (detail.subjectId != null) existing.subjectId = detail.subjectId;
-    if (detail.attempts != null) existing.attempts = detail.attempts;
-    if (detail.nextCheckAt != null) existing.nextCheckAt = detail.nextCheckAt;
-    // 失败条目必须立刻可重试：残留的退避时间会把一次 5xx 推迟到下个窗口。
-    if (detail.state === 'failed') delete existing.nextCheckAt;
-    return;
-  }
-  // 失败条目不带退避：它属于「这轮没成功」，不是「这条数据有缺口」。
-  const nextCheckAt = detail.state === 'failed' ? undefined : detail.nextCheckAt;
-  entries.set(key, {
+export const UNMATCHED_VERSION = 2;
+
+export type UnmatchedDocument = {
+  version: typeof UNMATCHED_VERSION;
+  updatedAt: string;
+  entries: UnmatchedEntry[];
+};
+
+const UNMATCHED_KINDS: ReadonlySet<string> = new Set([
+  'unresolved',
+  'skipped',
+  'failed',
+]);
+
+export function createUnmatchedEntry(input: {
+  kind: UnmatchedKind;
+  reason: string;
+  title: string;
+  itemUrl: string;
+  shelf: string;
+  neodbUuid: string;
+  category?: string;
+  subjectId?: number;
+  now: string;
+}): UnmatchedEntry {
+  return {
     source: 'neodb-bangumi',
-    reason: detail.reason,
-    title: detail.title,
-    itemUrl: detail.itemUrl,
-    ...(detail.category ? { category: detail.category } : {}),
-    ...(detail.shelf ? { shelf: detail.shelf } : {}),
-    ...(detail.neodbUuid ? { neodbUuid: detail.neodbUuid } : {}),
-    ...(detail.attempts != null ? { attempts: detail.attempts } : {}),
-    ...(detail.state != null ? { state: detail.state } : {}),
-    ...(detail.subjectId != null ? { subjectId: detail.subjectId } : {}),
-    ...(nextCheckAt ? { nextCheckAt } : {}),
-    firstSeenAt: now,
-    lastSeenAt: now,
-  });
+    kind: input.kind,
+    reason: input.reason,
+    title: input.title,
+    itemUrl: input.itemUrl,
+    ...(input.category ? { category: input.category } : {}),
+    shelf: input.shelf,
+    neodbUuid: input.neodbUuid,
+    ...(input.subjectId != null ? { subjectId: input.subjectId } : {}),
+    firstSeenAt: input.now,
+    lastSeenAt: input.now,
+    seenRounds: 1,
+    missedRounds: 0,
+  };
 }
 
-export function loadUnmatched(path: string): UnmatchedMap {
+export function loadUnmatched(path: string): UnmatchedEntry[] {
   if (!existsSync(path)) {
-    return new Map();
+    return [];
   }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Record<
-      string,
-      UnmatchedEntry
-    >;
-    return new Map(Object.entries(parsed));
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    consola.warn(`待核对名单文件损坏，按空名单处理: ${path}`);
-    return new Map();
+    consola.warn(`待核对名单不是合法 JSON，按空名单重建: ${path}`);
+    return [];
   }
+  const doc = parsed as Partial<UnmatchedDocument>;
+  if (
+    doc?.version !== UNMATCHED_VERSION ||
+    !Array.isArray(doc.entries) ||
+    !doc.entries.every(isUnmatchedEntry)
+  ) {
+    consola.warn(`待核对名单结构不受支持，按空名单重建: ${path}`);
+    return [];
+  }
+  return doc.entries.map((entry) => ({ ...entry }));
 }
 
-export function saveUnmatched(path: string, entries: UnmatchedMap): void {
+function isUnmatchedEntry(value: unknown): value is UnmatchedEntry {
+  if (value == null || typeof value !== 'object') return false;
+  const entry = value as Partial<UnmatchedEntry>;
+  return (
+    entry.source === 'neodb-bangumi' &&
+    typeof entry.kind === 'string' &&
+    UNMATCHED_KINDS.has(entry.kind) &&
+    typeof entry.reason === 'string' &&
+    typeof entry.title === 'string' &&
+    typeof entry.itemUrl === 'string' &&
+    typeof entry.shelf === 'string' &&
+    typeof entry.neodbUuid === 'string' &&
+    typeof entry.firstSeenAt === 'string' &&
+    typeof entry.lastSeenAt === 'string' &&
+    Number.isFinite(entry.seenRounds) &&
+    Number.isFinite(entry.missedRounds)
+  );
+}
+
+export function saveUnmatched(path: string, entries: readonly UnmatchedEntry[]): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(Object.fromEntries(entries), null, 2), 'utf8');
-}
-
-const DAY_MS = 86_400_000;
-
-/**
- * 按最后出现时间清理待核对名单。
- *
- * 只做「长期未再出现」的老化，不做「本轮未出现就删」——单链路没有多路径
- * coverage 对账，按轮次淘汰会在一次分页截断或限流后误删真实缺口。
- *
- * 规则：
- * - `maxAgeDays` 非有限数或 <= 0 → 不清理（0 = 永不清理）；
- * - `lastSeenAt` 无效 → 保留（不能因脏数据误删）；
- * - 严格早于截止时间才删除，恰好等于截止时间保留。
- *
- * 返回新 Map，不修改入参。
- */
-export function pruneUnmatched(
-  entries: UnmatchedMap,
-  maxAgeDays: number,
-  now: Date = new Date(),
-): { entries: UnmatchedMap; removed: number } {
-  const next = new Map(entries);
-  if (!Number.isFinite(maxAgeDays) || maxAgeDays <= 0) {
-    return { entries: next, removed: 0 };
-  }
-
-  const cutoff = now.getTime() - maxAgeDays * DAY_MS;
-  let removed = 0;
-  for (const [key, entry] of next) {
-    const lastSeen = Date.parse(entry.lastSeenAt);
-    if (Number.isNaN(lastSeen)) {
-      continue;
-    }
-    if (lastSeen < cutoff) {
-      next.delete(key);
-      removed += 1;
-    }
-  }
-  return { entries: next, removed };
+  const doc: UnmatchedDocument = {
+    version: UNMATCHED_VERSION,
+    updatedAt: new Date().toISOString(),
+    entries: [...entries],
+  };
+  writeFileSync(path, JSON.stringify(doc, null, 2), 'utf8');
 }
 
 // ─── 匹配审计 ───────────────────────────────────────────────────────────
@@ -281,19 +248,21 @@ export type SummaryContext = {
   finishedAt: string;
   dryRun: boolean;
   fullSync: boolean;
-  shelves: ShelfType[];
-  truncatedShelves: ShelfType[];
-  /** 名单合计；不传 `unmatchedStats` 时的兜底。 */
-  unmatchedCount: number;
+  shelves: readonly ShelfType[];
+  truncatedShelves: readonly ShelfType[];
   /**
-   * 待核对名单全量条目（未导入项）。渲染由 `unmatched-report.ts` 负责：
+   * 名单正文（已越过观察窗）。渲染由 `unmatched-report.ts` 负责：
    * 按链路→状态→分类→书架四级分组逐条列出。
    */
   unmatchedEntries?: readonly UnmatchedEntry[];
-  /** 本轮新增/移除/观察中/未扫描的计数。 */
-  unmatchedStats?: UnmatchedRunStats;
-  /** 本轮首次进入名单的条目（「本轮新增」小节）。 */
+  /** 本轮首次越过观察窗的条目。 */
   unmatchedAdded?: readonly UnmatchedEntry[];
+  /** 本轮移出名单的条目与原因。 */
+  unmatchedRemoved?: readonly RemovedEntry[];
+  /** 仍在观察窗内、尚未进入正文的条目。 */
+  unmatchedObserving?: readonly UnmatchedEntry[];
+  /** 本轮没进入扫描集合、因此冻结的条目。 */
+  unmatchedFrozen?: readonly UnmatchedEntry[];
   /** NeoDB 实例地址，供渲染层把历史名单里的相对链接补成绝对地址。 */
   neodbBaseUrl?: string;
   /** 「已存在 N 天」的参照时刻；不传则用 `finishedAt`。 */
@@ -349,14 +318,10 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
     ...renderUnmatchedSection(ctx.unmatchedEntries ?? [], {
       startedAt: ctx.startedAt,
       now: ctx.runNow ?? new Date(ctx.finishedAt),
-      stats: ctx.unmatchedStats ?? {
-        total: ctx.unmatchedCount,
-        added: 0,
-        removed: 0,
-        observed: ctx.unmatchedCount,
-        notScanned: 0,
-      },
-      addedEntries: ctx.unmatchedAdded ?? [],
+      added: ctx.unmatchedAdded ?? [],
+      removed: ctx.unmatchedRemoved ?? [],
+      observing: ctx.unmatchedObserving ?? [],
+      frozen: ctx.unmatchedFrozen ?? [],
       truncatedShelves: ctx.truncatedShelves,
       neodbBaseUrl: ctx.neodbBaseUrl,
     }),
