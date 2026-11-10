@@ -69,7 +69,7 @@ import {
   type TargetClaim,
 } from '../rules/target-claim';
 import { isUpToDate, progressApplicable } from '../rules/progress-gate';
-import { timeBudgetExhausted, type StopReason } from '../rules/budget';
+import { timeBudgetExhausted, mergeStopReason, type StopReason } from '../rules/budget';
 import { nextCheckAt, shouldRecheck } from '../rules/recheck';
 import {
   categoryAllowed,
@@ -192,6 +192,15 @@ export type SyncRunResult = {
   unmatchedStats: UnmatchedRunStats;
   /** 本轮首次进入名单的条目（「本轮新增」小节用）。 */
   unmatchedAdded: UnmatchedEntry[];
+  /**
+   * 本轮真正进入处理流程的条数；常规运行受 `SYNC_MAX_ITEMS` 限制。
+   * 配额按书架独立，因此理论上限是 `书架数 × SYNC_MAX_ITEMS`。
+   */
+  quotaUsed: number;
+  /** 本轮因增量指纹命中而整条跳过的条数（不消耗配额、不产生条目日志）。 */
+  incrementalSkipped: number;
+  /** 因触顶 `SYNC_MAX_ITEMS` 而提前结束的书架（其余书架仍已执行）。 */
+  cappedShelves: ShelfType[];
 };
 
 export default async function runNeodbToBangumi(
@@ -219,6 +228,9 @@ export default async function runNeodbToBangumi(
       stateReset: null,
       unmatchedStats: zeroUnmatchedStats(),
       unmatchedAdded: [],
+      quotaUsed: 0,
+      cappedShelves: [],
+      incrementalSkipped: 0,
     };
   }
   if (!bangumiToken) {
@@ -234,6 +246,9 @@ export default async function runNeodbToBangumi(
       stateReset: null,
       unmatchedStats: zeroUnmatchedStats(),
       unmatchedAdded: [],
+      quotaUsed: 0,
+      cappedShelves: [],
+      incrementalSkipped: 0,
     };
   }
   const me = await getBangumiMe();
@@ -250,6 +265,9 @@ export default async function runNeodbToBangumi(
       stateReset: null,
       unmatchedStats: zeroUnmatchedStats(),
       unmatchedAdded: [],
+      quotaUsed: 0,
+      cappedShelves: [],
+      incrementalSkipped: 0,
     };
   }
 
@@ -288,9 +306,14 @@ export default async function runNeodbToBangumi(
 
   consola.info(`Bangumi 账号: ${me.nickname || me.username}`);
 
-  // 配额只统计真正进入处理流程的条目：增量跳过不消耗预算。否则定时运行每天都会在
-  // 前 maxItems 条已同步条目上原地打转，永远走不到新增条目。
-  let budgetUsed = 0;
+  // 配额按书架独立：每个书架从零开始，4 个书架合计最多 `4 × SYNC_MAX_ITEMS`。
+  // 这样前一个书架吃满配额不会让后面的书架空转（旧实现是整轮共享一个计数器）。
+  let quotaUsed = 0;
+  // 增量指纹命中而整条跳过的条数。它计入 scanned/skipped，但不消耗配额、也不
+  // 产生任何条目日志；单独计数才能让汇总行把「扫描」与「配额消耗」分开说清。
+  let incrementalSkipped = 0;
+  // 触顶的书架：摘要据此说明「哪些书架被截断」，而不是笼统说「配额用尽」。
+  const cappedShelves: ShelfType[] = [];
   // 时间预算从遍历开始计时（不含凭据探测）；全量运行不使用它。
   const walkStartedAt = Date.now();
 
@@ -301,6 +324,9 @@ export default async function runNeodbToBangumi(
     if (startPage > 1) {
       consola.info(`书架 ${shelfType} 从第 ${startPage} 页续跑。`);
     }
+
+    // 每书架独立的配额计数器（对齐 Audiovisual-Transporter 的 shelf×category 预算）。
+    let shelfQuotaUsed = 0;
 
     const result = await walkShelfPages(
       shelfType,
@@ -335,18 +361,25 @@ export default async function runNeodbToBangumi(
           ) {
             record(report, 'skipped');
             report.scanned += 1;
+            incrementalSkipped += 1;
             continue;
           }
           if (!config.sync.fullSync) {
             // 双上限、先到者停：条目轻时按条数，条目重时按时间。
-            if (budgetUsed >= config.sync.maxItems) {
-              ctx.stopReason = 'max-items';
+            if (shelfQuotaUsed >= config.sync.maxItems) {
+              // 只结束当前书架：后面的书架仍有自己的配额，必须继续跑。
+              ctx.stopReason = mergeStopReason(ctx.stopReason, 'max-items');
+              if (!cappedShelves.includes(shelfType)) cappedShelves.push(shelfType);
+              consola.warn(
+                `书架 ${shelfType} 达到 SYNC_MAX_ITEMS（${config.sync.maxItems}），` +
+                  '结束本书架；其余书架继续。',
+              );
               return false;
             }
             if (
               timeBudgetExhausted(Date.now() - walkStartedAt, config.sync.timeBudgetMs)
             ) {
-              ctx.stopReason = 'time-budget';
+              ctx.stopReason = mergeStopReason(ctx.stopReason, 'time-budget');
               consola.info(
                 `时间预算用尽（${config.sync.timeBudgetMs}ms），本轮主动收尾；` +
                   `已处理条目的状态会正常落盘。`,
@@ -355,7 +388,8 @@ export default async function runNeodbToBangumi(
             }
           }
           report.scanned += 1;
-          budgetUsed += 1;
+          shelfQuotaUsed += 1;
+          quotaUsed += 1;
 
           // 单条未预期异常不能葬送整轮：认证失败才中止，其余记 failed 后继续，
           // 保证审计 / 报告 / 摘要仍能落盘。
@@ -424,6 +458,9 @@ export default async function runNeodbToBangumi(
 
     if (result.truncated) {
       truncatedShelves.push(shelfType);
+      // 截断比配额触顶更严重：链路根本不知道自己漏了什么。原因按严重度合并，
+      // 摘要因此不会把一次网络问题说成「调大 SYNC_MAX_ITEMS 就好」。
+      ctx.stopReason = mergeStopReason(ctx.stopReason, 'partial-read');
     }
     // 每趟写一次状态：中断后最多重走一个书架的增量比较。
     if (ctx.stateDirty && !config.sync.dryRun) {
@@ -434,8 +471,19 @@ export default async function runNeodbToBangumi(
 
   let prunedRemoved = 0;
   if (!config.sync.dryRun) {
+    // 读取不完整必须冻结老化：没走到的条目否则会被当成「本轮未出现」而误删。
+    // 这与 Audiovisual-Transporter 的 `truncated → 冻结老化` 同一策略。
+    const freezeAgeing = truncatedShelves.length > 0;
+    if (freezeAgeing) {
+      consola.warn(
+        `本轮有书架未遍历完整（${truncatedShelves.join('、')}）：` +
+          '冻结待核对名单老化，避免把没走到的条目误判为已消失。',
+      );
+    }
     // 清理必须发生在所有 upsert 之后：否则会把本轮刚刷新过 lastSeenAt 的条目误删。
-    const pruned = pruneUnmatched(unmatched, config.sync.reviewStateMaxAgeDays);
+    const pruned = freezeAgeing
+      ? { entries: new Map(unmatched), removed: 0 }
+      : pruneUnmatched(unmatched, config.sync.reviewStateMaxAgeDays);
     prunedRemoved = pruned.removed;
     if (pruned.removed > 0) {
       unmatched.clear();
@@ -472,6 +520,9 @@ export default async function runNeodbToBangumi(
     stopReason: ctx.stopReason,
     unmatchedStats: unmatchedSummary.stats,
     unmatchedAdded: unmatchedSummary.added,
+    quotaUsed,
+    incrementalSkipped,
+    cappedShelves,
   };
 }
 

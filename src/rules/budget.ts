@@ -17,5 +17,27 @@ export function timeBudgetExhausted(elapsedMs: number, budgetMs: number): boolea
   return elapsedMs >= budgetMs;
 }
 
-/** 停止原因：用于摘要与 JSON 报告区分「配额」与「时间」。 */
-export type StopReason = 'max-items' | 'time-budget' | null;
+/**
+ * 停止原因：用于摘要与 JSON 报告区分三类中断。
+ *
+ * - `max-items`：至少一个书架触顶 `SYNC_MAX_ITEMS`。**其余书架仍会执行**——
+ *   配额按书架独立，不是整轮预算；没有顺延机制，因此不得声称「下一轮继续」。
+ * - `time-budget`：整轮时间预算用尽，剩余书架不再开始。
+ * - `partial-read`：某书架未走到自然结束（分页失败 / 响应畸形 / 页数上限）。
+ *   它比 `max-items` 更严重：配置上限知道自己漏了什么，截断则不知道。
+ *
+ * 对齐 Audiovisual-Transporter 的 `capped` / `truncated` 双标志语义。
+ */
+export type StopReason = 'max-items' | 'time-budget' | 'partial-read' | null;
+
+/** 多个停止原因并存时取更严重的那个：截断 > 时间 > 配额。 */
+export function mergeStopReason(current: StopReason, next: StopReason): StopReason {
+  const rank: Record<NonNullable<StopReason>, number> = {
+    'partial-read': 3,
+    'time-budget': 2,
+    'max-items': 1,
+  };
+  if (next == null) return current;
+  if (current == null) return next;
+  return rank[next] > rank[current] ? next : current;
+}

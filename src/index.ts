@@ -8,6 +8,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { consola } from 'consola';
 import { decideExitCode } from './rules/exit-code';
+import { formatScanSummary } from './rules/scan-summary';
 import { describeSyncConfig, loadSyncConfig } from './sync-config';
 import runNeodbToBangumi from './paths/neodb-to-bangumi';
 import {
@@ -72,14 +73,31 @@ async function main(): Promise<void> {
   }
 
   const { report, truncatedShelves } = result;
+  // 「扫描」含增量跳过与整条跳过，「配额消耗」才是受 SYNC_MAX_ITEMS 限制的条数；
+  // 混用一个数字会让「上限 50 却显示 162」看起来像配额失效。
   consola.info(
-    `扫描 ${report.scanned}：写入 ${report.written}｜无变化 ${report.unchanged}｜` +
-      `跳过 ${report.skipped}｜未匹配 ${report.unresolved}｜失败 ${report.failed}`,
+    formatScanSummary({
+      ...report,
+      quotaUsed: result.quotaUsed,
+      incrementalSkipped: result.incrementalSkipped,
+      cappedShelves: result.cappedShelves,
+      fullSync: config.sync.fullSync,
+    }),
   );
-  if (result.stopReason === 'time-budget') {
+  if (result.stopReason === 'partial-read') {
+    // 截断比配额更严重：链路不知道自己漏了什么，绝不能引导读者去调配额。
+    consola.warn(
+      '本轮读取不完整：已冻结待核对名单老化，避免把没走到的条目误判为已消失。',
+    );
+  } else if (result.stopReason === 'time-budget') {
     consola.warn('时间预算用尽，本轮提前收尾；已处理条目的状态已落盘。');
-  } else if (result.stopReason === 'max-items') {
-    consola.info('条目配额用尽，本轮正常收尾；下一轮从新增条目继续。');
+  }
+  if (result.cappedShelves.length) {
+    // 配额按书架独立：只列触顶的书架，不声称「下一轮接着跑」——没有顺延机制。
+    consola.info(
+      `以下书架达到 SYNC_MAX_ITEMS 后结束（其余书架已照常执行）: ` +
+        `${result.cappedShelves.join(', ')}`,
+    );
   }
   if (truncatedShelves.length) {
     consola.warn(`以下书架未遍历完整: ${truncatedShelves.join(', ')}`);
