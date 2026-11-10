@@ -1,0 +1,68 @@
+name: keepalive
+
+# 目的：GitHub 会在公开仓库连续 60 天无活动时自动禁用 scheduled workflow。
+# 本 workflow 用「必要时一次空提交」重置该计时，属于预防性维护。
+#
+# 边界：只能预防，不能自救 —— workflow 一旦被禁用，schedule 不再触发，
+# 保活步骤也就不会运行；此时需要 `gh workflow enable keepalive.yml` 人工恢复。
+#
+# 与业务完全解耦：不 checkout 业务依赖、不读业务 secret、不调用业务 API、
+# 不共享 concurrency、失败互不阻塞（见 sync.yml）。
+
+on:
+  schedule:
+    # 每周一 03:17 UTC。频率远小于 60 天：单次 cron 延迟或失败不会立刻踩线，
+    # 又比每月检查更安全。
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '忽略 45 天阈值，立即创建一次保活提交'
+        type: boolean
+        default: false
+
+# 只需推送一次空提交，不要扩大到其他权限。
+permissions:
+  contents: write
+
+# 独立并发组：避免两个保活 job 同时 push 造成 non-fast-forward。
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    # 只对默认分支生效：在 feature 分支提交不会重置默认分支的活动计时。
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create activity commit when due
+        env:
+          # schedule 触发时 inputs 为空，回退为 false；workflow_dispatch 传布尔值。
+          FORCE: ${{ github.event.inputs.force || 'false' }}
+          # 45 天阈值 + 15 天缓冲：约每 45–52 天提交一次，约 8 次/年。
+          THRESHOLD_DAYS: '45'
+        run: |
+          set -euo pipefail
+
+          last_ts=$(git log -1 --format=%ct)
+          now_ts=$(date -u +%s)
+          age_days=$(( (now_ts - last_ts) / 86400 ))
+
+          echo "Last commit age: ${age_days} days (threshold: ${THRESHOLD_DAYS})"
+
+          if [ "${FORCE}" != "true" ] && [ "${age_days}" -lt "${THRESHOLD_DAYS}" ]; then
+            echo "Recent activity exists; skip."
+            exit 0
+          fi
+
+          # 空提交：不触碰业务文件、不产生内容冲突，语义也最明确。
+          # 失败时让 job 显式红灯，由下个周期自然重试；不做循环重试，也不吞错误。
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore(keepalive): $(date -u +%Y-%m-%d) [skip ci]"
+          git push
