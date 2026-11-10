@@ -4,6 +4,7 @@
  * 与 `rules/*` 同样的理由：排版属于纯函数，可以离线断言。摘要长什么样不应该
  * 只有跑完一次真实同步才知道。
  */
+import { absoluteNeodbUrl, DEFAULT_NEODB_BASE_URL } from './rules/neodb-display';
 import type { UnmatchedEntry } from './sync-report';
 
 /** 名单条目的三种状态。`skipped` 只用于「真的没导入」的跳过（如被更强认领者挤掉）。 */
@@ -52,6 +53,11 @@ export type RenderUnmatchedMeta = {
   truncatedShelves?: readonly string[];
   /** 链路名；当前只有一条，留作扩展。 */
   link?: string;
+  /**
+   * NeoDB 实例地址，用于把历史名单里的站内相对链接（`/movie/xxx`）补成绝对地址。
+   * 不传时由 `absoluteNeodbUrl` 回退官方域名。
+   */
+  neodbBaseUrl?: string;
 };
 
 export const CATEGORY_LABELS: Readonly<Record<string, string>> = {
@@ -242,14 +248,19 @@ export function zeroUnmatchedStats(): UnmatchedRunStats {
   return { total: 0, added: 0, removed: 0, observed: 0, notScanned: 0 };
 }
 
-function renderEntryLine(entry: UnmatchedEntry, index: number, now: Date): string {
+function renderEntryLine(
+  entry: UnmatchedEntry,
+  index: number,
+  now: Date,
+  baseUrl: string,
+): string {
   const reason =
     entry.subjectId == null
       ? entry.reason
       : `${entry.reason}(subject/${entry.subjectId})`;
   const days = daysSince(entry.firstSeenAt, now);
   const age = days == null ? '已存在天数未知' : `已存在 ${days} 天`;
-  const url = entry.itemUrl || '（无链接）';
+  const url = absoluteNeodbUrl(entry.itemUrl, baseUrl) || '（无链接）';
   return ` ${index}. ${entry.title} — ${url} · ${reason} · ${age}`;
 }
 
@@ -263,6 +274,7 @@ export function renderUnmatchedSection(
   meta: RenderUnmatchedMeta,
 ): string[] {
   const link = meta.link ?? DEFAULT_LINK;
+  const baseUrl = meta.neodbBaseUrl?.trim() || DEFAULT_NEODB_BASE_URL;
   const { stats } = meta;
   const lines: string[] = [];
   lines.push(`## 待核对名单（${stats.total} 条）`);
@@ -310,7 +322,7 @@ export function renderUnmatchedSection(
           ? entry.reason
           : `${entry.reason}(subject/${entry.subjectId})`;
       lines.push(
-        `${stateOf(entry)} ${entry.title} — ${entry.itemUrl || '（无链接）'} · ${reason}（${link}）`,
+        `${stateOf(entry)} ${entry.title} — ${absoluteNeodbUrl(entry.itemUrl, baseUrl) || '（无链接）'} · ${reason}（${link}）`,
       );
     }
   }
@@ -327,7 +339,7 @@ export function renderUnmatchedSection(
         for (const shelf of category.shelves) {
           lines.push(`${shelf.label}（${shelf.entries.length}）`);
           shelf.entries.forEach((entry, index) => {
-            lines.push(renderEntryLine(entry, index + 1, meta.now));
+            lines.push(renderEntryLine(entry, index + 1, meta.now, baseUrl));
           });
         }
       }

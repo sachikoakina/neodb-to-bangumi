@@ -134,6 +134,29 @@ describe('条目行与时间', () => {
     expect(md).toContain('（无链接）');
   });
 
+  it('历史名单里的相对 URL 由渲染层补成绝对地址', () => {
+    const md = render([entry({ itemUrl: '/movie/3IFQp20nMweuIdKwGoDdtN' })]);
+    expect(md).toContain(
+      ' 1. 海底两万里 — https://neodb.social/movie/3IFQp20nMweuIdKwGoDdtN · ' +
+        'no-bangumi-match · 已存在 5 天',
+    );
+  });
+
+  it('相对 URL 按 meta.neodbBaseUrl 拼到自建实例', () => {
+    const md = render([entry({ itemUrl: '/movie/abc' })], {
+      neodbBaseUrl: 'https://neodb.example.org',
+    });
+    expect(md).toContain('https://neodb.example.org/movie/abc');
+  });
+
+  it('neodbBaseUrl 为空时回退官方域名，不拼出 undefined/movie', () => {
+    const md = render([entry({ itemUrl: '/movie/abc' })], {
+      neodbBaseUrl: '',
+    });
+    expect(md).toContain('https://neodb.social/movie/abc');
+    expect(md).not.toContain('undefined');
+  });
+
   it('首次出现时间非法时降级为「已存在天数未知」', () => {
     expect(daysSince('not-a-date', NOW)).toBeNull();
     const md = render([entry({ firstSeenAt: '' })]);
@@ -190,6 +213,20 @@ describe('汇总段', () => {
     expect(md).toContain('本轮新增（1）');
     expect(md).toContain(
       'unresolved 海底两万里 — https://neodb.social/book/1 · collection-not-found(subject/411170)（NeoDB → Bangumi）',
+    );
+  });
+
+  it('本轮新增里的相对 URL 同样补成绝对地址', () => {
+    const added = entry({
+      reason: 'no-bangumi-match',
+      itemUrl: '/movie/3IFQp20nMweuIdKwGoDdtN',
+    });
+    const md = render([added], {
+      stats: stats({ total: 1, added: 1, observed: 0 }),
+      addedEntries: [added],
+    });
+    expect(md).toContain(
+      'unresolved 海底两万里 — https://neodb.social/movie/3IFQp20nMweuIdKwGoDdtN · no-bangumi-match',
     );
   });
 

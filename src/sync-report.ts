@@ -111,6 +111,11 @@ export function upsertUnmatched(
   const existing = entries.get(key);
   if (existing) {
     existing.reason = detail.reason;
+    // 展示字段每次都用调用方重新归一后的值覆盖：历史名单里可能存着英文原名或
+    // 站内相对链接，重跑时必须自愈成「首个本地化名 + 绝对地址」，否则旧值会
+    // 被这份持久状态一直带进摘要（渲染层只能补链接，补不回本地化名）。
+    existing.title = detail.title;
+    existing.itemUrl = detail.itemUrl;
     if (detail.refreshLastSeen !== false) {
       existing.lastSeenAt = now;
     }
@@ -289,6 +294,8 @@ export type SummaryContext = {
   unmatchedStats?: UnmatchedRunStats;
   /** 本轮首次进入名单的条目（「本轮新增」小节）。 */
   unmatchedAdded?: readonly UnmatchedEntry[];
+  /** NeoDB 实例地址，供渲染层把历史名单里的相对链接补成绝对地址。 */
+  neodbBaseUrl?: string;
   /** 「已存在 N 天」的参照时刻；不传则用 `finishedAt`。 */
   runNow?: Date;
   /**
@@ -351,6 +358,7 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
       },
       addedEntries: ctx.unmatchedAdded ?? [],
       truncatedShelves: ctx.truncatedShelves,
+      neodbBaseUrl: ctx.neodbBaseUrl,
     }),
   );
   if (ctx.metrics) {

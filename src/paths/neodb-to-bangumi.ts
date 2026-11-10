@@ -61,6 +61,7 @@ import {
   planBangumiPrivate,
 } from '../rules/neodb-bangumi-mapping';
 import { planBookProgress, planEpisodeProgress } from '../rules/bangumi-progress';
+import { absoluteNeodbUrl, displayName } from '../rules/neodb-display';
 import { decideWriteOutcome, type ProgressSignal } from '../rules/write-decision';
 import {
   shelfStatusRank,
@@ -375,15 +376,11 @@ export default async function runNeodbToBangumi(
               reason: 'item-threw',
               error: truncateError(detail),
             });
-            recordUnmatched(
-              ctx,
-              mark,
-              'item-threw',
-              mark.item.display_title || mark.item.title || mark.item.uuid,
-              { state: 'failed' },
-            );
+            recordUnmatched(ctx, mark, 'item-threw', displayName(mark.item), {
+              state: 'failed',
+            });
             consola.error(
-              `条目处理异常，继续下一条: ${mark.item.display_title || mark.item.title || mark.item.uuid} —`,
+              `条目处理异常，继续下一条: ${displayName(mark.item)} — ${absoluteNeodbUrl(mark.item.url, ctx.config.neodb.baseUrl)}`,
               detail,
             );
           } finally {
@@ -488,7 +485,7 @@ async function processMark(
 ): Promise<ItemOutcome> {
   const { config } = ctx;
   const item = mark.item;
-  const label = item.display_title || item.title || item.uuid;
+  const label = displayName(item);
   const fingerprint = fingerprintMark(mark);
 
   // 匹配审计：每条处理的条目记录匹配对象、证据与结局，运行结束统一落盘。
@@ -581,7 +578,7 @@ async function processMark(
     upsertUnmatched(ctx.unmatched, item.uuid, {
       reason: 'duplicate-target',
       title: label,
-      itemUrl: item.url,
+      itemUrl: absoluteNeodbUrl(item.url, ctx.config.neodb.baseUrl),
       category: item.category,
       shelf: String(mark.shelf_type),
       neodbUuid: item.uuid,
@@ -906,7 +903,7 @@ function createAuditEntry(mark: NeodbShelfMark): MatchAuditEntry {
   const item = mark.item;
   return {
     uuid: item.uuid,
-    label: item.display_title || item.title || item.uuid,
+    label: displayName(item),
     category: String(item.category),
     shelf: String(mark.shelf_type),
     via: null,
@@ -965,7 +962,7 @@ function recordUnmatched(
   upsertUnmatched(ctx.unmatched, mark.item.uuid, {
     reason,
     title: label,
-    itemUrl: mark.item.url,
+    itemUrl: absoluteNeodbUrl(mark.item.url, ctx.config.neodb.baseUrl),
     category: String(mark.item.category),
     shelf: String(mark.shelf_type),
     neodbUuid: mark.item.uuid,
@@ -1040,7 +1037,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
       const yearRes = await resolveItemYear(item, ctx);
       if (yearRes.kind === 'failed') {
         consola.warn(
-          `NeoDB 条目年份读取失败，本轮不做无年份匹配: ${item.display_title || item.title}`,
+          `NeoDB 条目年份读取失败，本轮不做无年份匹配: ${displayName(item)}`,
         );
         return { kind: 'failed', reason: 'bangumi-year-fetch-failed', auth: false };
       }

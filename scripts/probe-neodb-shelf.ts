@@ -10,6 +10,7 @@ import {
   verifyNeodbToken,
 } from '../src/clients/neodb-shelf';
 import { extractBangumiSubjectId } from '../src/rules/neodb-bangumi-matching';
+import { displayName } from '../src/rules/neodb-display';
 import { SHELF_TYPES } from '../src/types';
 
 async function main(): Promise<void> {
@@ -39,7 +40,7 @@ async function main(): Promise<void> {
       const item = mark.item;
       const bangumiId = extractBangumiSubjectId(item.external_resources);
       consola.info(
-        `  - ${item.display_title || item.title}｜shelf=${mark.shelf_type}｜` +
+        `  - ${displayName(item)}｜shelf=${mark.shelf_type}｜` +
           `rating=${mark.rating_grade ?? 0}｜comment=${(mark.comment_text ?? '').length}字｜` +
           `bangumi外链=${bangumiId ?? '无'}`,
       );

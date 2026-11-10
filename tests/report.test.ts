@@ -70,6 +70,27 @@ describe('待核对名单 upsert', () => {
     expect(map.size).toBe(1);
   });
 
+  it('重跑时自愈展示字段：旧英文名/相对链接被新归一值覆盖', () => {
+    const map = new Map();
+    // 模拟历史名单：英文原名 + 站内相对链接。
+    upsertUnmatched(map, 'uuid-heal', {
+      reason: 'no-bangumi-match',
+      title: '14 Blades',
+      itemUrl: '/movie/3IFQp20nMweuIdKwGoDdtN',
+    });
+    // 下一次 upsert 传入 paths 层按 displayName / absoluteNeodbUrl 归一后的值。
+    upsertUnmatched(map, 'uuid-heal', {
+      reason: 'no-bangumi-match',
+      title: '锦衣卫',
+      itemUrl: 'https://neodb.social/movie/3IFQp20nMweuIdKwGoDdtN',
+    });
+    const stored = map.get('uuid-heal')!;
+    expect(stored.title).toBe('锦衣卫');
+    expect(stored.itemUrl).toBe('https://neodb.social/movie/3IFQp20nMweuIdKwGoDdtN');
+    // firstSeenAt 仍不能动（upsert 语义），size 也不该增长。
+    expect(map.size).toBe(1);
+  });
+
   it('记录分类/书架/uuid 元数据，便于人工核对', () => {
     const map = new Map();
     upsertUnmatched(map, 'uuid-2', {
@@ -200,6 +221,82 @@ describe('摘要渲染', () => {
       ' 1. 海底两万里 — https://neodb.social/book/1 · no-bangumi-match · 已存在 5 天',
     );
     expect(md).toContain('duplicate-target(subject/16260)');
+  });
+
+  it('回归：英文 display_title + 中文 localized_title + 相对 URL → 锦衣卫 + 绝对地址', () => {
+    // 名称与链接已由 paths 在写入名单时归一（displayName / absoluteNeodbUrl），
+    // 这里用归一后的 UnmatchedEntry 走完整摘要渲染，断言用户看到的就是最终形态。
+    const md = renderSummaryMarkdown(createReport(), {
+      startedAt: '2026-11-09T15:58:24Z',
+      finishedAt: '2026-11-09T16:06:16Z',
+      dryRun: false,
+      fullSync: false,
+      shelves: ['complete'],
+      truncatedShelves: [],
+      neodbBaseUrl: 'https://neodb.social',
+      unmatchedCount: 1,
+      unmatchedEntries: [
+        {
+          source: 'neodb-bangumi',
+          reason: 'no-bangumi-match',
+          title: '锦衣卫',
+          itemUrl: 'https://neodb.social/movie/3IFQp20nMweuIdKwGoDdtN',
+          category: 'movie',
+          shelf: 'complete',
+          firstSeenAt: '2026-11-09T16:06:16Z',
+          lastSeenAt: '2026-11-09T16:06:16Z',
+        },
+      ],
+      unmatchedStats: { total: 1, added: 1, removed: 0, observed: 0, notScanned: 0 },
+      unmatchedAdded: [
+        {
+          source: 'neodb-bangumi',
+          reason: 'no-bangumi-match',
+          title: '锦衣卫',
+          itemUrl: 'https://neodb.social/movie/3IFQp20nMweuIdKwGoDdtN',
+          category: 'movie',
+          shelf: 'complete',
+          firstSeenAt: '2026-11-09T16:06:16Z',
+          lastSeenAt: '2026-11-09T16:06:16Z',
+        },
+      ],
+    });
+    expect(md).toContain('锦衣卫');
+    expect(md).not.toContain('14 Blades');
+    expect(md).toContain(
+      ' 1. 锦衣卫 — https://neodb.social/movie/3IFQp20nMweuIdKwGoDdtN · ',
+    );
+    expect(md).toContain(
+      'unresolved 锦衣卫 — https://neodb.social/movie/3IFQp20nMweuIdKwGoDdtN · ',
+    );
+    expect(md).not.toContain('— /movie/');
+  });
+
+  it('SummaryContext 的 neodbBaseUrl 透传给渲染层（历史相对 URL 按自建实例补全）', () => {
+    const md = renderSummaryMarkdown(createReport(), {
+      startedAt: '2026-11-09T15:58:24Z',
+      finishedAt: '2026-11-09T16:06:16Z',
+      dryRun: false,
+      fullSync: false,
+      shelves: ['complete'],
+      truncatedShelves: [],
+      neodbBaseUrl: 'https://neodb.example.org',
+      unmatchedCount: 1,
+      unmatchedEntries: [
+        {
+          source: 'neodb-bangumi',
+          reason: 'no-bangumi-match',
+          title: '锦衣卫',
+          itemUrl: '/movie/3IFQp20nMweuIdKwGoDdtN',
+          category: 'movie',
+          shelf: 'complete',
+          firstSeenAt: '2026-11-09T16:06:16Z',
+          lastSeenAt: '2026-11-09T16:06:16Z',
+        },
+      ],
+      unmatchedStats: { total: 1, added: 0, removed: 0, observed: 1, notScanned: 0 },
+    });
+    expect(md).toContain('https://neodb.example.org/movie/3IFQp20nMweuIdKwGoDdtN');
   });
 
   it('不传 metrics 时不出现阶段耗时表（保持旧输出）', () => {

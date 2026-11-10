@@ -101,6 +101,7 @@ async function main(): Promise<void> {
     unmatchedEntries: [...result.unmatched.values()],
     unmatchedStats: result.unmatchedStats,
     unmatchedAdded: result.unmatchedAdded,
+    neodbBaseUrl: config.neodb.baseUrl,
     runNow: new Date(finishedAt),
     metrics: result.metrics,
     stopReason: result.stopReason,
