@@ -1,4 +1,4 @@
-# 增量同步性能诊断与优化方案
+﻿# 增量同步性能诊断与优化方案
 
 本文诊断「增量同步过慢」的成因，并给出在不引入并发前提下可落地的优化方向。所有代码引用基于**改造前基线** `4188c31`；优化已于 2026-11-09 按第 6 节的 O1/O2/O3/O5/O6/O7/O8/O9/O10 落地（见第 10 节），因此行号已漂移——按函数名定位，不要按旧行号。O4 与 O11 刻意未实现。
 
@@ -283,14 +283,14 @@ T_shelf = N_page · r + (N_page − 1) · d_n        src/clients/neodb-shelf.ts:
 | O3 年份后移          | 已落地             | `resolveMatch` 内懒加载                                |
 | O4 跨轮缓存          | **未落地**（刻意） | —                                                      |
 | O5 增量可补进度      | 已落地             | `src/rules/progress-gate.ts`、`SyncState` v2           |
-| O6 未匹配退避        | 已落地             | `src/rules/recheck.ts`、`UnmatchedEntry.attempts`      |
+| O6 未匹配退避        | 已被轮次观察取代   | 现由 `src/rules/review-rounds.ts` 判定名单进出         |
 | O7 分集限额 + 短路   | 已落地             | `fillEpisodeProgress` 的 `options.maxEpisodes`         |
 | O8 时间预算          | 已落地             | `src/rules/budget.ts`                                  |
 | O9 重试              | 已落地             | `bangumiGot`（`src/clients/bangumi-http.ts`）          |
 | O10 合并重复等待     | 已落地             | 主循环 `finally` 的条件节流                            |
 | O11 全局节拍         | **未落地**（刻意） | —                                                      |
 
-新增配置三项：`SYNC_TIME_BUDGET_MS`、`SYNC_MAX_EPISODES_PER_ITEM`、`SYNC_UNMATCHED_RETRY_DAYS`。三者均已同步 `.env.example`、`README.md` 配置表与 `src/sync-config.ts` 的 `ENV_KEYS`，`npm run verify:docs` 通过。
+新增配置两项：`SYNC_TIME_BUDGET_MS`、`SYNC_MAX_EPISODES_PER_ITEM`。两者均已同步 `.env.example`、`README.md` 配置表与 `src/sync-config.ts` 的 `ENV_KEYS`，`npm run verify:docs` 通过。
 
 ### O1 耗时与请求量埋点（P0，先量后改）
 
@@ -521,7 +521,7 @@ process.exitCode=(onlyA.length+onlyB.length)?1:0;
 | ----------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
 | 审计五元组              | 仅允许一类差异：`failed(bangumi-year-fetch-failed)` → `unresolved(no-bangumi-match)` | 其余任何 `(uuid, subjectId, via, outcome, reason)` 不同都算回归（见 O3 风险）；`sourceYear` 不纳入比对 |
 | `written` 计数          | 前后一致                                                                             | dry-run 下 `written` 是计划数                                                                          |
-| `unmatched.json` 键集合 | 不减少（除 `REVIEW_STATE_MAX_AGE_DAYS` 老化）                                        | dry-run 写到 `unmatched-dryrun.json`，不污染正式文件                                                   |
+| `unmatched.json` 键集合 | 逐轮合并：新增与移除都经轮次判定                                                     | dry-run 写到 `unmatched-dryrun.json`，不污染正式文件                                                   |
 | 报告恒等式              | `scanned = written + unchanged + skipped + unresolved + failed`                      | `assertReportInvariant`（`src/sync-report.ts:33-42`）必须为真                                          |
 
 注意事项：dry-run 不写 state（`rememberState` 在 `:626-632` 直接返回）、不写全量游标（`cursorPath` 在 `:207-208` 为空），所以等价性测试是**无副作用**的，可以反复跑。
@@ -540,7 +540,7 @@ SYNC_MAX_ITEMS=10 npm run sync    # 第二轮
 | 第二轮分集 PUT         | 0（日志无 `分集进度: ...missing=` 非零行）                                                                                                       |
 | `sync-state.json` 格式 | 只接受 `{ version: 2, updatedAt, marks, targets, progress }`；版本号或字段类型不符会被丢弃并按空状态处理（不做字段级兼容），代价是那一轮重算一次 |
 | 收藏字段               | 抽查若干 subject 的 `type/rate/comment/private` 与 dry-run 计划一致                                                                              |
-| 未匹配名单             | 条目不因本轮缺席而被删（只有 `lastSeenAt` 老化会删，`:310-321`）                                                                                 |
+| 未匹配名单             | 未导入条目不因单轮缺席被删；只有连续两轮被检查到且未再出现才移出                                                                                 |
 
 ### 8.4 灰度顺序
 
@@ -580,7 +580,6 @@ SYNC_MAX_ITEMS=10 npm run sync    # 第二轮
 | `src/metrics.ts`                | 阶段耗时、条目墙钟分位、Bangumi/NeoDB 等待次数与毫秒；`timeStage` 包装器；纯函数 `percentile` |
 | `src/rules/progress-gate.ts`    | `progressApplicable` / `isUpToDate`：进度适用性与增量跳过判定（纯函数）                       |
 | `src/rules/budget.ts`           | `timeBudgetExhausted`、`StopReason`、`mergeStopReason`（原因按严重度合并）                    |
-| `src/rules/recheck.ts`          | 1/2/4/7 天退避阶梯、`nextCheckAt`、`shouldRecheck`                                            |
 | `tests/metrics.test.ts` 等 7 个 | 见 10.4                                                                                       |
 
 ### 10.2 行为变化（刻意，均已在代码注释与 README 标注）
@@ -592,7 +591,7 @@ SYNC_MAX_ITEMS=10 npm run sync    # 第二轮
 | 分集写入上限         | 无                      | `SYNC_MAX_EPISODES_PER_ITEM`，截断记 `progress-partial` 且不写 `done`                     |
 | 条目尾部节流         | 每条无条件 `sleep(400)` | 本条已发生过 Bangumi 等待时不再重复睡                                                     |
 | 年份读取时机         | 搜索之前                | 出现精确候选之后                                                                          |
-| 未匹配条目           | 每轮完整重匹配          | 按 1/2/4/7 天退避（有外链的条目仍每轮重试）                                               |
+| 未匹配条目           | 每轮完整重匹配          | 同样每轮重匹配；改由「观察窗 + 两轮缺席 + 覆盖对账」决定名单进出                          |
 | 无候选且年份读取失败 | `failed`                | `unresolved`（见 O3 风险）                                                                |
 
 ### 10.3 未做
@@ -602,14 +601,14 @@ SYNC_MAX_ITEMS=10 npm run sync    # 第二轮
 
 ### 10.4 验证结果（离线）
 
-| 检查                  | 结果                                                                                                                                   |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run typecheck`   | 通过                                                                                                                                   |
-| `npm run lint`        | 通过                                                                                                                                   |
-| `npm run test`        | 20 个文件 / 248 条用例全通过（落地时 169 条；后续配额与脱敏改造增至 248）                                                              |
-| `npm run verify:docs` | 35 个变量双向一致                                                                                                                      |
-| `prettier --check`    | 通过                                                                                                                                   |
-| 新增测试              | `metrics` / `sync-state` / `progress-gate` / `budget` / `recheck` / `bgm-client` / `subject-cache`；扩展 `episode-progress` / `report` |
+| 检查                  | 结果                                                                                                                       |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `npm run typecheck`   | 通过                                                                                                                       |
+| `npm run lint`        | 通过                                                                                                                       |
+| `npm run test`        | 20 个文件 / 248 条用例全通过（落地时 169 条；后续配额与脱敏改造增至 248）                                                  |
+| `npm run verify:docs` | 35 个变量双向一致                                                                                                          |
+| `prettier --check`    | 通过                                                                                                                       |
+| 新增测试              | `metrics` / `sync-state` / `progress-gate` / `budget` / `bgm-client` / `subject-cache`；扩展 `episode-progress` / `report` |
 
 未执行的验收：8.2 的等价性 dry-run 与 8.3 的两轮正式运行需要能直连两个 API（当前环境 TCP 443 不通，见 8.0），请在网络可用环境或 CI 上按 8.4 的灰度顺序执行。
 
@@ -617,10 +616,10 @@ SYNC_MAX_ITEMS=10 npm run sync    # 第二轮
 
 本节记录落地之后、会影响本文结论的两项改动。
 
-| 变更                             | 内容                                                                                                                                                                                            | 对本文的影响                                                                      |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| **配额改为每书架独立**           | `SYNC_MAX_ITEMS` 由整轮共享改为每书架独立；计数器 `shelfQuotaUsed` 在书架循环内重置，触顶只结束当前书架。合计上限 = 书架数 × 该值（默认 4 × 50 = 200）                                          | **2.3 与 5.1 节已随之修订**；「每天 50 条是全局上限」的说法不再成立               |
-| **新增 `partial-read` 停止原因** | `StopReason` 扩为 `max-items` / `time-budget` / `partial-read`，由 `mergeStopReason` 按严重度合并（截断 > 时间 > 配额）。书架未遍历完整时**冻结待核对名单老化**，避免把没走到的条目误判为已消失 | 5.1 节第 7 项「无耗时埋点」部分缓解；停止原因现在能区分「配置上限」与「读取故障」 |
+| 变更                             | 内容                                                                                                                                                                                                    | 对本文的影响                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| **配额改为每书架独立**           | `SYNC_MAX_ITEMS` 由整轮共享改为每书架独立；计数器 `shelfQuotaUsed` 在书架循环内重置，触顶只结束当前书架。合计上限 = 书架数 × 该值（默认 4 × 50 = 200）                                                  | **2.3 与 5.1 节已随之修订**；「每天 50 条是全局上限」的说法不再成立               |
+| **新增 `partial-read` 停止原因** | `StopReason` 扩为 `max-items` / `time-budget` / `partial-read`，由 `mergeStopReason` 按严重度合并（截断 > 时间 > 配额）。书架未遍历完整时**不参与待核对名单的缺席判定**，避免把没走到的条目误判为已消失 | 5.1 节第 7 项「无耗时埋点」部分缓解；停止原因现在能区分「配置上限」与「读取故障」 |
 
 同时新增 `src/rules/scan-summary.ts`（`formatScanSummary`）与 `src/rules/neodb-display.ts`（`displayName` / `absoluteNeodbUrl`），前者把汇总行拆成「扫描」与「配额消耗」两个口径，后者统一报告里的名称与链接。两者均为纯函数，不改变本文的性能结论。
 
