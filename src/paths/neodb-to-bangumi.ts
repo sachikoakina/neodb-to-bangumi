@@ -801,7 +801,7 @@ async function processMark(
       return finish('failed', 'collection-write-failed', truncateError(write.message));
     }
     consola.info(
-      `写入 Bangumi: subject/${subjectId} reasons=${reasons.join('+')} ` +
+      `写入 Bangumi: https://bangumi.tv/subject/${subjectId} reasons=${reasons.join('+')} ` +
         `type=${status.type} rate=${rate} private=${privatePlan.private}` +
         `${epStatus != null ? ` ep_status=${epStatus}` : ''}` +
         `${volStatus != null ? ` vol_status=${volStatus}` : ''}（${label}）`,
