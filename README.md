@@ -189,6 +189,7 @@ npm run cleanup -- audit/cleanup-list.txt --apply --set-type 1   # 同时把收�
 - **真人影视匹配率**：Bangumi 对动画/书籍/游戏/音乐覆盖好，真人电影/电视剧覆盖弱，无外链的条目可能大量 unresolved——在 NeoDB 条目上补 Bangumi 外链后重跑即可命中；
 - **同名歧义**：多个精确同名候选且年份/媒体形态无法区分时，本轮不会写入，记 `ambiguous-bangumi-match`；这是刻意不猜，补外链即可解决；
 - **影视年份缺失**：来源为电影/电视剧时，只要源或候选任一侧年份不可判定就不裁决，记 `ambiguous-year-missing`。未定档、Bangumi 未填日期的条目会长期停在这里，需人工补日期或在 NeoDB 补外链；书籍/音乐/游戏不受此限制；
+- **跨媒介同名**：`日剧`、`华语剧` 等平台已归一为 tv，电影条目不会再错配到同名剧集；但 `OVA`/`动画` 等平台不可判定，仍可能与同名电影/剧集混淆；动画与真人剧（同为 tv）无法靠形态区分；
 - `podcast` / `performance` 分类在 Bangumi 无对应类型，写入侧跳过；
 - **建收藏被 404 拒绝**：Bangumi 偶有对「存在但不可收藏」的条目（被合并、锁定、服务端限制）拒绝 `POST /v0/users/-/collections/{id}`。这类条目记 `collection-not-found` 并进待核对名单，不会每轮重复判红；确认后可人工处理或加忽略；
 - **首次开启进度拉满会回填一次**：历史条目此前被记成「已同步」，开启后会重新检查分集（但不再需要 `FULL_SYNC`）。用 `SYNC_MAX_EPISODES_PER_ITEM` 与 `SYNC_TIME_BUDGET_MS` 分多轮推进即可。

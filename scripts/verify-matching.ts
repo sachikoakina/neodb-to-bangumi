@@ -202,6 +202,13 @@ async function mediaChecks(): Promise<void> {
     62,
   );
 
+  // 国别剧平台（日剧/华语剧）归一为 tv 后，电影源的跨媒介候选必须被拒绝
+  const jdrama = subject({ id: 63, platform: '日剧', air_year: 2001 });
+  const rejected = await pickExactMatch([jdrama], 2001, 1, {
+    mediaForm: 'movie',
+  });
+  check('源 movie 拒绝日剧候选', rejected.status, 'no-candidate');
+
   // 同年同形态多候选 → 歧义
   const picked3 = await pickExactMatch(
     [

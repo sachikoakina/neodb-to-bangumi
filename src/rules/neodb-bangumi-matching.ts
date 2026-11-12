@@ -131,22 +131,58 @@ export function neodbCategoryToMediaForm(
   return null;
 }
 
+/** 明确的电影平台；中文值原样存放，不做模糊匹配。 */
+const MOVIE_PLATFORMS: ReadonlySet<string> = new Set([
+  '电影',
+  '剧场版',
+  '劇場版',
+  '映画',
+  '映畫',
+]);
+
 /**
- * Bangumi 平台 → 媒体形态。刻意保守：
- * - `剧场版` / `电影` → movie；
- * - `TV` / `Web` / `电视剧` / `动态漫画` → tv；
- * - OVA / OAD / 未定 / 空值 → null（不可判定，不参与冲突判断）。
+ * 明确的剧集平台；国别剧（日剧/华语剧/美剧…）统一归 tv。
+ * ASCII 值一律小写存放，查表前 value 已 toLowerCase。
+ */
+const TV_PLATFORMS: ReadonlySet<string> = new Set([
+  'tv',
+  'web',
+  '电视剧',
+  '剧集',
+  '网络剧',
+  '短剧',
+  '动态漫画',
+  '日剧',
+  '韩剧',
+  '美剧',
+  '英剧',
+  '泰剧',
+  '港剧',
+  '台剧',
+  '华语剧',
+  '欧美剧',
+]);
+
+/**
+ * Bangumi 平台 → 媒体形态。
+ *
+ * 采用**全等匹配 + 白名单**，刻意不做"含『剧』即 tv"这类模糊规则：
+ * `舞台剧`、`动画` 一旦被误判，后果是候选被直接丢弃（不可恢复），
+ * 所以宁可返回 null（不可判定，不参与形态冲突过滤）。
+ *
+ * 归 tv 的清单里包含国别剧平台（日剧/华语剧/美剧…）——缺了它们，
+ * "电影 ↔ 剧集"这种最明显的冲突会被跳过，正是 403493 / 164871 的成因。
+ *
+ * 明确不判定（返回 null）：OVA / OAD、动画、舞台剧、综艺、纪录片、未定、空值。
  */
 export function bangumiPlatformMediaForm(
   platform: string | undefined,
 ): MediaForm | null {
   const value = platform?.trim();
   if (!value) return null;
-  if (value === '剧场版' || value === '电影') return 'movie';
-  if (value === 'TV' || value === 'Web' || value === '电视剧' || value === '动态漫画') {
-    return 'tv';
-  }
-  if (/^tv$/i.test(value) || /^web$/i.test(value)) return 'tv';
+  const key = value.toLowerCase();
+  if (MOVIE_PLATFORMS.has(key)) return 'movie';
+  if (TV_PLATFORMS.has(key)) return 'tv';
   return null;
 }
 

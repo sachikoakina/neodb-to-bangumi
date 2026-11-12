@@ -91,13 +91,27 @@ describe('年份与媒体形态解析', () => {
     expect(neodbCategoryToMediaForm(undefined)).toBeNull();
   });
 
-  it('Bangumi 平台 → 媒体形态（保守识别）', () => {
-    expect(bangumiPlatformMediaForm('剧场版')).toBe('movie');
+  it('Bangumi 平台 → 媒体形态（白名单全等匹配）', () => {
+    // 电影
     expect(bangumiPlatformMediaForm('电影')).toBe('movie');
+    expect(bangumiPlatformMediaForm('剧场版')).toBe('movie');
+    expect(bangumiPlatformMediaForm('劇場版')).toBe('movie');
+    // 剧集：国别剧平台必须归一为 tv，否则「电影↔剧集」冲突会被跳过
     expect(bangumiPlatformMediaForm('TV')).toBe('tv');
+    expect(bangumiPlatformMediaForm('tv')).toBe('tv');
     expect(bangumiPlatformMediaForm('Web')).toBe('tv');
     expect(bangumiPlatformMediaForm('电视剧')).toBe('tv');
+    expect(bangumiPlatformMediaForm('剧集')).toBe('tv');
+    expect(bangumiPlatformMediaForm('日剧')).toBe('tv');
+    expect(bangumiPlatformMediaForm('华语剧')).toBe('tv');
+    expect(bangumiPlatformMediaForm('美剧')).toBe('tv');
+    // 刻意不判定：OVA/动画/舞台剧等无法归入 movie/tv 二元模型
     expect(bangumiPlatformMediaForm('OVA')).toBeNull();
+    expect(bangumiPlatformMediaForm('OAD')).toBeNull();
+    expect(bangumiPlatformMediaForm('动画')).toBeNull();
+    expect(bangumiPlatformMediaForm('舞台剧')).toBeNull();
+    expect(bangumiPlatformMediaForm('综艺')).toBeNull();
+    expect(bangumiPlatformMediaForm('')).toBeNull();
     expect(bangumiPlatformMediaForm(undefined)).toBeNull();
   });
 });
