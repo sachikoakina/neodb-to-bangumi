@@ -160,8 +160,12 @@ export type MatchPick =
   | {
       status: 'ambiguous';
       candidates: BangumiSubject[];
-      /** 歧义成因：多候选并列，或唯一候选证据不足（strict 模式持留）。 */
-      hold?: 'insufficient-evidence';
+      /**
+       * 歧义成因：
+       * - `insufficient-evidence`：唯一候选证据不足（strict 持留）；
+       * - `year-missing`：影视条目任一侧年份不可判定，缺失即不裁决。
+       */
+      hold?: 'insufficient-evidence' | 'year-missing';
     }
   | { status: 'no-candidate' };
 
@@ -171,9 +175,12 @@ export type MatchPickOptions = {
   /** 由调用方注入证据读取（可能需要读完整条目），测试可传普通函数。 */
   resolveEvidence?: (subject: BangumiSubject) => Promise<MatchEvidence> | MatchEvidence;
   /**
-   * 严格模式：唯一候选若「年份无法核对（任一侧未知）」且「双方形态无法
-   * 相互印证」（书籍/音乐/游戏没有形态证据，等价于仅看年份核对），
-   * 不自动命中，转 ambiguous 并标记 `hold: 'insufficient-evidence'`。
+   * 严格模式：
+   * - 影视（来源 movie/tv）要求双方年份均可确定，任一缺失即出局并标记
+   *   `hold: 'year-missing'`（形态互证恒真，不足以单独定案）；
+   * - 其余类目维持原规则：唯一候选若「年份无法核对」且「双方形态无法
+   *   相互印证」，不自动命中，转 ambiguous 并标记
+   *   `hold: 'insufficient-evidence'`。
    * 默认关闭（保持三态原语义）。
    */
   strict?: boolean;
@@ -189,10 +196,16 @@ export type MatchPickOptions = {
  *
  * 步骤：
  * 1. 逐候选取年份与媒体形态；
- * 2. 年份过滤（仅类型 2/6）：源未知不比较；候选未知通过；
+ * 2. 年份过滤（仅类型 2/6）：双方已知且超出容差 → 剔除（负证据）；
  * 3. 媒体形态过滤：双方可判定且冲突才拒绝；
- * 4. 剩余一个 → 命中（strict 下需年份核对或形态互证，否则证据不足持留）；
+ * 4. **影视年份证据**（strict + 来源 movie/tv）：任一侧年份不可判定 → 不裁决，
+ *    收集为 `year-missing`；全部候选因此出局时返回 ambiguous；
+ * 5. 剩余一个 → 命中（strict 下需年份核对或形态互证，否则证据不足持留）；
  *    多个 → 按年份距离取唯一最小者；距离并列或全部不可知 → ambiguous。
+ *
+ * 第 4 步的理由：`movie ↔ 电影` 这种形态互证几乎恒真，等于没有门槛。
+ * 「年份对不上」是否定证据，应当拒绝；「年份不知道」只是没有证据，不应据此
+ * 猜测——两者分开处理，影视条目缺年份时宁可转人工核对。
  *
  * 相比旧的 first-hit，这里**不再**返回第一个通过者：多个同样可信的
  * 候选意味着证据不足，写入任何一个都可能选错作品。
@@ -221,6 +234,8 @@ export async function pickExactMatch(
     distance: number | null;
     evidence: MatchEvidence;
   }> = [];
+  /** 形态相容、但因年份不可判定而出局的候选；用于把结果落到 ambiguous。 */
+  const yearMissing: BangumiSubject[] = [];
 
   for (const candidate of candidates) {
     const evidence = await resolveEvidence(candidate);
@@ -244,6 +259,16 @@ export async function pickExactMatch(
       continue;
     }
 
+    // 影视（来源 movie/tv）必须有年份证据：形态互证恒真，不足以单独定案。
+    if (
+      options.strict &&
+      options.mediaForm != null &&
+      (expectedYear == null || evidence.year == null)
+    ) {
+      yearMissing.push(candidate);
+      continue;
+    }
+
     const distance =
       isYearFilterType(candidate.type) && expectedYear != null && evidence.year != null
         ? Math.abs(evidence.year - expectedYear)
@@ -251,6 +276,9 @@ export async function pickExactMatch(
     viable.push({ subject: candidate, distance, evidence });
   }
 
+  if (!viable.length && yearMissing.length) {
+    return { status: 'ambiguous', candidates: yearMissing, hold: 'year-missing' };
+  }
   if (!viable.length) {
     return { status: 'no-candidate' };
   }

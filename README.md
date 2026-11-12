@@ -71,7 +71,7 @@ FULL_SYNC=1 npm run sync                  # 全量正式迁移
 | `SYNC_CATEGORIES`          | CSV      | `book,movie,tv,music,game`           | 分类白名单，可选 `podcast,performance`（Bangumi 无对应类型，写入侧跳过）。**写错分类名会让白名单整体作废（失败在关闭一侧），本次不同步任何分类** |
 | `SYNC_YEAR_TOLERANCE`      | number   | `1`                                  | 标题匹配允许的年份差；动画（2）/真人（6）/书籍（1）/音乐（3）/游戏（4）参与过滤                                                                  |
 | `SYNC_YEAR_TOLERANCE_BOOK` | number   | `1`                                  | 书籍类（type 1）单独的年份容差；初版/再版年份口径差异大，可单独放宽                                                                              |
-| `SYNC_MATCH_STRICT`        | boolean  | `1`                                  | 匹配严格模式：唯一同名候选年份无法核对且形态不可判定时转待核对，不自动写入（宁可漏配，不可错配）；`0` = 证据缺失照写（旧行为）                   |
+| `SYNC_MATCH_STRICT`        | boolean  | `1`                                  | 匹配严格模式：影视条目年份不可判定、或唯一候选证据不足时转待核对，不自动写入（宁可漏配，不可错配）；`0` = 证据缺失照写（旧行为）                 |
 
 #### 3. 字段合并与保护（9 项）
 
@@ -188,6 +188,7 @@ npm run cleanup -- audit/cleanup-list.txt --apply --set-type 1   # 同时把收�
 - **收藏时间无法迁移**：Bangumi API 不接受自定义收藏时间，服务端写 `updated_at`；
 - **真人影视匹配率**：Bangumi 对动画/书籍/游戏/音乐覆盖好，真人电影/电视剧覆盖弱，无外链的条目可能大量 unresolved——在 NeoDB 条目上补 Bangumi 外链后重跑即可命中；
 - **同名歧义**：多个精确同名候选且年份/媒体形态无法区分时，本轮不会写入，记 `ambiguous-bangumi-match`；这是刻意不猜，补外链即可解决；
+- **影视年份缺失**：来源为电影/电视剧时，只要源或候选任一侧年份不可判定就不裁决，记 `ambiguous-year-missing`。未定档、Bangumi 未填日期的条目会长期停在这里，需人工补日期或在 NeoDB 补外链；书籍/音乐/游戏不受此限制；
 - `podcast` / `performance` 分类在 Bangumi 无对应类型，写入侧跳过；
 - **建收藏被 404 拒绝**：Bangumi 偶有对「存在但不可收藏」的条目（被合并、锁定、服务端限制）拒绝 `POST /v0/users/-/collections/{id}`。这类条目记 `collection-not-found` 并进待核对名单，不会每轮重复判红；确认后可人工处理或加忽略；
 - **首次开启进度拉满会回填一次**：历史条目此前被记成「已同步」，开启后会重新检查分集（但不再需要 `FULL_SYNC`）。用 `SYNC_MAX_EPISODES_PER_ITEM` 与 `SYNC_TIME_BUDGET_MS` 分多轮推进即可。

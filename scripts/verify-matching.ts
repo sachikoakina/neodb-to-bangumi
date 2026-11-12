@@ -250,8 +250,8 @@ async function strictChecks(): Promise<void> {
     102,
   );
 
-  // 形态互证（源 movie ↔ 候选 剧场版）→ 命中
-  const formOk = await pickExactMatch(
+  // 影视年份缺失：形态互证不足以定案 → ambiguous + year-missing
+  const formHeld = await pickExactMatch(
     [subject({ id: 103, platform: '剧场版' })],
     null,
     1,
@@ -261,9 +261,9 @@ async function strictChecks(): Promise<void> {
     },
   );
   check(
-    'strict：形态互证 → 命中',
-    formOk.status === 'matched' ? formOk.subject.id : null,
-    103,
+    'strict：影视年份缺失 → year-missing',
+    formHeld.status === 'ambiguous' && formHeld.hold === 'year-missing',
+    true,
   );
 
   // 书籍候选年份核对通过 → 命中；年份无法核对 → 持留

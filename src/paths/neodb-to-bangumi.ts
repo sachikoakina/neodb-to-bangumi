@@ -155,7 +155,10 @@ type MatchResult =
   | {
       kind: 'unresolved';
       reason:
-        'no-bangumi-match' | 'bangumi-all-rejected-by-year' | 'ambiguous-bangumi-match';
+        | 'no-bangumi-match'
+        | 'bangumi-all-rejected-by-year'
+        | 'ambiguous-bangumi-match'
+        | 'ambiguous-year-missing';
       evidence: MatchEvidenceInfo | null;
     }
   | {
@@ -1114,18 +1117,23 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
       consola.warn(
         `同名候选无法唯一裁决: uuid=${item.uuid} title="${title}" ` +
           `year=${sourceYear ?? 'missing'} media=${mediaForm ?? 'unknown'} ` +
+          `hold=${picked.hold ?? 'none'} ` +
           `candidates=${picked.candidates
             .map((c) => `${c.id}(${c.name_cn || c.name})`)
             .join(',')}`,
       );
-      // 单候选歧义 = strict 证据持留；取该候选证据留痕（有缓存，零额外请求）。
+      // 单候选歧义要取该候选证据留痕（有缓存，零额外请求）。
       const held =
         picked.candidates.length === 1
           ? await resolveCandidateEvidence(picked.candidates[0]!, ctx)
           : null;
       return {
         kind: 'unresolved',
-        reason: 'ambiguous-bangumi-match',
+        // 缺年份与证据不足是两种事实：前者是「没读到日期」，后者是「读到了但不足以定案」。
+        reason:
+          picked.hold === 'year-missing'
+            ? 'ambiguous-year-missing'
+            : 'ambiguous-bangumi-match',
         evidence: {
           sourceYear,
           sourceMediaForm: mediaForm,

@@ -54,21 +54,24 @@
    候选 name/name_cn 经 trim().toLowerCase() 后必须与搜索标题完全相等
 3. 证据裁决：
    a. 年份过滤（动画 2 / 真人 6 / 书籍 1 / 音乐 3 / 游戏 4）：
-      源年份未知不比较；候选未知通过；
       双方都有 → |候选 − 源| ≤ 容差（书籍用 SYNC_YEAR_TOLERANCE_BOOK，
-      其余用 SYNC_YEAR_TOLERANCE）
-   b. 媒体形态过滤：NeoDB movie/tv 对比 Bangumi platform
+      其余用 SYNC_YEAR_TOLERANCE）；超容差 → 剔除（负证据：知道不是它）
+   b. 影视年份证据（SYNC_MATCH_STRICT=1 且来源 movie/tv）：
+      源年份或候选年份任一不可判定 → 该候选不参与裁决；
+      全部候选因此出局 → ambiguous（hold=year-missing）——
+      movie↔剧场版 的形态互证恒真，不足以单独定案
+   c. 媒体形态过滤：NeoDB movie/tv 对比 Bangumi platform
       （剧场版/电影→movie；TV/Web/电视剧/动态漫画→tv；
        OVA 等不可判定 → 不拒绝）
-   c. 年份接近度打分：唯一最高分 → 命中；并列或全部不可知 → ambiguous
-   d. 严格模式（SYNC_MATCH_STRICT=1，默认）：唯一候选若年份无法核对
-      （任一侧未知）且双方形态无法相互印证（书籍/音乐/游戏无形态证据，
-      等价于仅看年份核对）→ 证据不足持留（hold=insufficient-evidence），
-      转 ambiguous 进待核对名单——宁可漏配，不可错配
+   d. 年份接近度打分：唯一最高分 → 命中；并列或全部不可知 → ambiguous
+   e. 严格模式（其余类目）：唯一候选若年份无法核对（任一侧未知）且双方
+      形态无法相互印证（书籍/音乐/游戏无形态证据，等价于仅看年份核对）
+      → 证据不足持留（hold=insufficient-evidence），转 ambiguous
+      进待核对名单——宁可漏配，不可错配
 ```
 
 - 不猜、不模糊匹配、不跨分类回退；多候选不再取第一个。
-- 歧义（`ambiguous-bangumi-match`）不写入，记 unresolved；本方向没有「直连回退」可用。
+- 歧义不写入，记 unresolved，原因分两种：`ambiguous-bangumi-match`（多候选并列 / 证据不足）与 `ambiguous-year-missing`（影视年份不可判定）；本方向没有「直连回退」可用。
 - 搜索失败、年份读取失败归 `failed`（可重跑），**不**伪装成「没有结果」；读取收藏失败同样按 failed 处理，绝不当成「未收藏」覆盖。
 - 条目缺年份时按 `api_url` 拉取 NeoDB 条目详情补齐并缓存；失败不缓存，下轮重试。
 - 未匹配与歧义写入待核对名单（upsert 去重，带 category/shelf/uuid）；在 NeoDB 条目上补 Bangumi 外链后下轮即可命中。

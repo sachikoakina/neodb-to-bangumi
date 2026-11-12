@@ -284,14 +284,19 @@ describe('证据严格模式（strict，SYNC_MATCH_STRICT=1）', () => {
     });
   });
 
-  it('形态互证（源 movie ↔ 候选 剧场版）→ 命中', async () => {
+  it('形态互证不足以定案：影视年份缺失 → ambiguous + year-missing', async () => {
+    // 事故 subject/489920 的复现：源年份 null、候选无日期，仅靠 movie↔剧场版 互证。
     const picked = await pickExactMatch(
       [subject({ id: 23, platform: '剧场版' })],
       null,
       1,
       { strict: true, mediaForm: 'movie' },
     );
-    expect(picked.status).toBe('matched');
+    expect(picked).toEqual({
+      status: 'ambiguous',
+      candidates: [expect.objectContaining({ id: 23 })],
+      hold: 'year-missing',
+    });
   });
 
   it('源年份未知时候选年份无法核对 → 持留', async () => {
@@ -346,6 +351,116 @@ describe('证据严格模式（strict，SYNC_MATCH_STRICT=1）', () => {
         expect.objectContaining({ id: 28 }),
       ],
     });
+  });
+});
+
+describe('影视年份证据（strict + movie/tv）', () => {
+  it('源年份已知、候选无年份 → ambiguous + year-missing', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 30, platform: '剧场版' })],
+      2018,
+      1,
+      { strict: true, mediaForm: 'movie' },
+    );
+    expect(picked).toEqual({
+      status: 'ambiguous',
+      candidates: [expect.objectContaining({ id: 30 })],
+      hold: 'year-missing',
+    });
+  });
+
+  it('候选年份已知、源年份缺失 → ambiguous + year-missing', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 31, platform: '剧场版', air_year: 2018 })],
+      null,
+      1,
+      { strict: true, mediaForm: 'movie' },
+    );
+    expect(picked.status === 'ambiguous' && picked.hold === 'year-missing').toBe(true);
+  });
+
+  it('双方年份已知且合规 → 照常命中', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 32, platform: '剧场版', air_year: 2018 })],
+      2018,
+      1,
+      { strict: true, mediaForm: 'movie' },
+    );
+    expect(picked.status).toBe('matched');
+  });
+
+  it('双方年份已知但超容差 → 仍是 no-candidate（负证据不变）', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 33, platform: '剧场版', air_year: 2000 })],
+      2018,
+      1,
+      { strict: true, mediaForm: 'movie' },
+    );
+    expect(picked.status).toBe('no-candidate');
+  });
+
+  it('电视剧同样受约束（mediaForm=tv）', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 34, platform: 'TV' })],
+      2019,
+      1,
+      {
+        strict: true,
+        mediaForm: 'tv',
+      },
+    );
+    expect(picked.status === 'ambiguous' && picked.hold === 'year-missing').toBe(true);
+  });
+
+  it('书籍不受影响：缺年份仍走 insufficient-evidence，而非 year-missing', async () => {
+    const held = await pickExactMatch([subject({ id: 35, type: 1 })], 2020, 1, {
+      strict: true,
+    });
+    expect(holdInsufficient(held)).toBe(true);
+  });
+
+  it('多候选：缺年份者出局，合规者照常命中', async () => {
+    const picked = await pickExactMatch(
+      [
+        subject({ id: 36, platform: '剧场版' }),
+        subject({ id: 37, platform: '剧场版', air_year: 2018 }),
+      ],
+      2018,
+      1,
+      { strict: true, mediaForm: 'movie' },
+    );
+    expect(picked.status).toBe('matched');
+    expect(picked.status === 'matched' && picked.subject.id).toBe(37);
+  });
+
+  it('多候选全部缺年份 → ambiguous + year-missing，候选全列出', async () => {
+    const picked = await pickExactMatch(
+      [
+        subject({ id: 38, platform: '剧场版' }),
+        subject({ id: 39, platform: '剧场版' }),
+      ],
+      2018,
+      1,
+      { strict: true, mediaForm: 'movie' },
+    );
+    expect(picked).toEqual({
+      status: 'ambiguous',
+      candidates: [
+        expect.objectContaining({ id: 38 }),
+        expect.objectContaining({ id: 39 }),
+      ],
+      hold: 'year-missing',
+    });
+  });
+
+  it('关闭 strict → 保留旧的「证据缺失照写」语义', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 40, platform: '剧场版' })],
+      2018,
+      1,
+      { strict: false, mediaForm: 'movie' },
+    );
+    expect(picked.status).toBe('matched');
   });
 });
 
