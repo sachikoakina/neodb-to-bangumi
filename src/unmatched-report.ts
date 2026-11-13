@@ -12,6 +12,8 @@ import type { RemovedEntry, UnmatchedEntry, UnmatchedKind } from './sync-report'
 
 export type UnmatchedShelfGroup = { label: string; entries: UnmatchedEntry[] };
 export type UnmatchedCategoryGroup = {
+  /** 原始分类键（book/movie/…），用于判断是否默认折叠。 */
+  key: string;
   label: string;
   count: number;
   shelves: UnmatchedShelfGroup[];
@@ -90,6 +92,18 @@ const CATEGORY_ORDER: readonly string[] = [
 ];
 const SHELF_ORDER: readonly string[] = ['wishlist', 'progress', 'complete', 'dropped'];
 
+/**
+ * 默认折叠的分类：条目多、单条价值低，是否展开交给读者。
+ * 只影响 Job Summary 的排版（`<details>`），不改变任何数据。
+ */
+const COLLAPSED_CATEGORIES: ReadonlySet<string> = new Set([
+  'book',
+  'music',
+  'game',
+  'podcast',
+  'performance',
+]);
+
 export function categoryLabel(category: string | undefined): string {
   if (!category) return UNKNOWN_CATEGORY;
   return CATEGORY_LABELS[category] ?? category;
@@ -167,6 +181,7 @@ export function groupUnmatched(
               entries: [...bucket].sort(compareEntries),
             }));
           return {
+            key: category,
             label: categoryLabel(category),
             count: shelfGroups.reduce((sum, group) => sum + group.entries.length, 0),
             shelves: shelfGroups,
@@ -314,13 +329,27 @@ export function renderUnmatchedSection(
       lines.push('');
       lines.push(`#### ${kindGroup.kind}（${kindGroup.count}）`);
       for (const category of kindGroup.categories) {
+        const collapsed = COLLAPSED_CATEGORIES.has(category.key) && category.count > 0;
         lines.push('');
-        lines.push(`**${category.label}（${category.count}）**`);
+        if (collapsed) {
+          // `<summary>` 后必须空一行，否则内部 Markdown 会被当成纯文本。
+          lines.push('<details>');
+          lines.push(
+            `<summary><b>${category.label}（${category.count}）</b></summary>`,
+          );
+          lines.push('');
+        } else {
+          lines.push(`**${category.label}（${category.count}）**`);
+        }
         for (const shelf of category.shelves) {
           lines.push(`${shelf.label}（${shelf.entries.length}）`);
           shelf.entries.forEach((entry, index) => {
             lines.push(renderEntryLine(entry, index + 1, meta.now, baseUrl));
           });
+        }
+        if (collapsed) {
+          lines.push('');
+          lines.push('</details>');
         }
       }
     }

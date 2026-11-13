@@ -59,6 +59,7 @@ describe('分组', () => {
     ]);
     expect(group!.kinds.map((item) => item.count)).toEqual([2, 1, 1]);
     const unresolved = group!.kinds[0]!;
+    expect(unresolved.categories[0]!.key).toBe('book');
     expect(unresolved.categories[0]!.label).toBe('书籍');
     expect(unresolved.categories[0]!.shelves[0]!.label).toBe('在看');
     expect(unresolved.categories[0]!.shelves[0]!.entries).toHaveLength(2);
@@ -81,6 +82,44 @@ describe('分组', () => {
 
   it('空名单返回空数组', () => {
     expect(groupUnmatched([])).toEqual([]);
+  });
+});
+
+describe('折叠（Job Summary 的 details）', () => {
+  it('书籍与音乐默认折叠，电影保持展开', () => {
+    const book = render([entry({ category: 'book' })]);
+    expect(book).toContain('<details>');
+    expect(book).toContain('<summary><b>书籍（1）</b></summary>');
+    expect(book).toContain('</details>');
+    // 折叠时不再重复输出粗体标题，避免 summary 与正文各显示一次
+    expect(book).not.toContain('**书籍（1）**');
+
+    const music = render([entry({ category: 'music' })]);
+    expect(music).toContain('<summary><b>音乐（1）</b></summary>');
+
+    const movie = render([entry({ category: 'movie' })]);
+    expect(movie).toContain('**电影（1）**');
+    expect(movie).not.toContain('<details>');
+  });
+
+  it('多个折叠分类各自闭合，标签成对', () => {
+    const md = render([
+      entry({ category: 'book' }),
+      entry({ category: 'music', neodbUuid: 'uuid-2', shelf: 'complete' }),
+    ]);
+    expect(md.match(/<details>/g)).toHaveLength(2);
+    expect(md.match(/<\/details>/g)).toHaveLength(2);
+  });
+
+  it('summary 后有且只有一个空行（否则内部 Markdown 不渲染）', () => {
+    const lines = renderUnmatchedSection([entry({ category: 'book' })], {
+      startedAt: '2026-11-09T15:58:24Z',
+      now: NOW,
+    });
+    const summaryAt = lines.findIndex((line) => line.includes('<summary>'));
+    expect(summaryAt).toBeGreaterThan(-1);
+    expect(lines[summaryAt + 1]).toBe('');
+    expect(lines[summaryAt + 2]).not.toBe('');
   });
 });
 
