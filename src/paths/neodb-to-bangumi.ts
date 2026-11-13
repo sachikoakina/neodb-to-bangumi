@@ -62,6 +62,7 @@ import {
 } from '../rules/neodb-bangumi-mapping';
 import { planBookProgress, planEpisodeProgress } from '../rules/bangumi-progress';
 import { absoluteNeodbUrl, displayName } from '../rules/neodb-display';
+import { normalizeIsbn } from '../rules/isbn';
 import { decideWriteOutcome, type ProgressSignal } from '../rules/write-decision';
 import {
   shelfStatusRank,
@@ -125,7 +126,8 @@ type SyncContext = {
   username: string;
   state: SyncState;
   stateDirty: boolean;
-  yearCache: Map<string, number | null>;
+  /** 条目详情缓存：一次请求同时取年份与 ISBN；失败不写入缓存。 */
+  itemCache: Map<string, { year: number | null; isbn: string | null }>;
   /** 完整条目缓存（仅成功解析的）；用于年份与平台，失败下轮重试。 */
   subjectCache: Map<number, BangumiSubject>;
   targetClaims: Map<number, TargetClaim>;
@@ -167,7 +169,8 @@ type MatchResult =
       auth: boolean;
     };
 
-type YearResolution = { kind: 'ok'; year: number | null } | { kind: 'failed' };
+type ItemDetailResolution =
+  { kind: 'ok'; year: number | null; isbn: string | null } | { kind: 'failed' };
 
 /** 认证中途失效：中止整轮，而不是把剩余条目录成 failed。 */
 class AuthAbortError extends Error {}
@@ -298,7 +301,7 @@ export default async function runNeodbToBangumi(
     username: me.username,
     state,
     stateDirty: false,
-    yearCache: new Map(),
+    itemCache: new Map(),
     subjectCache: new Map(),
     targetClaims: new Map(),
     unmatched,
@@ -1045,7 +1048,8 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
   // 搜不到候选时年份对结论毫无影响，提前读取等于白付一次 NeoDB 详情请求，
   // 而这类条目恰恰每轮都会重来。
   let sourceYear: number | null = null;
-  let yearResolved = false;
+  let sourceIsbn: string | null = null;
+  let detailResolved = false;
 
   // 第二级：按候选标题依次搜索；第三级：精确同名 + 证据裁决。
   for (const title of titleCandidates(item)) {
@@ -1066,16 +1070,17 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
     sawExact = true;
     lastExactIds = exact.map((s) => s.id);
 
-    if (!yearResolved) {
-      const yearRes = await resolveItemYear(item, ctx);
-      if (yearRes.kind === 'failed') {
+    if (!detailResolved) {
+      const detailRes = await resolveItemDetail(item, ctx);
+      if (detailRes.kind === 'failed') {
         consola.warn(
-          `NeoDB 条目年份读取失败，本轮不做无年份匹配: ${displayName(item)}`,
+          `NeoDB 条目详情读取失败，本轮不做无年份匹配: ${displayName(item)}`,
         );
         return { kind: 'failed', reason: 'bangumi-year-fetch-failed', auth: false };
       }
-      sourceYear = yearRes.year;
-      yearResolved = true;
+      sourceYear = detailRes.year;
+      sourceIsbn = detailRes.isbn;
+      detailResolved = true;
     }
 
     const picked = await pickExactMatch(
@@ -1086,6 +1091,7 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
         mediaForm,
         strict: ctx.config.sync.matchStrict,
         bookTolerance: ctx.config.sync.bookYearTolerance,
+        expectedIsbn: sourceIsbn,
         resolveEvidence: (subject) => resolveCandidateEvidence(subject, ctx),
       },
     );
@@ -1093,15 +1099,17 @@ async function resolveMatch(item: NeodbItem, ctx: SyncContext): Promise<MatchRes
     if (picked.status === 'matched') {
       // 挑选过程中已读过证据（有缓存），这里复取一次用于审计留痕。
       const evidence = await resolveCandidateEvidence(picked.subject, ctx);
+      const via = picked.via ?? 'title';
       consola.info(
-        `Bangumi 匹配: uuid=${item.uuid} via=title title="${title}" ` +
+        `Bangumi 匹配: uuid=${item.uuid} via=${via} title="${title}" ` +
           `year=${sourceYear ?? 'missing'} media=${mediaForm ?? 'unknown'} ` +
+          `isbn=${sourceIsbn ?? 'missing'} ` +
           `candidates=${exact.length} chosen=${picked.subject.id}`,
       );
       return {
         kind: 'matched',
         subjectId: picked.subject.id,
-        via: 'title',
+        via,
         subjectName: picked.subject.name_cn || picked.subject.name,
         evidence: {
           sourceYear,
@@ -1207,28 +1215,36 @@ export async function readSubjectCached(
 }
 
 /**
- * 条目年份：书架列表不含年份，缺时按 `api_url` 拉详情补齐并缓存。
- * 读取失败返回 failed 且不缓存 —— 不能把一次网络故障固化成「没有年份」。
+ * 条目详情：年份与 ISBN 一次取回。
+ *
+ * 非书籍且列表已带年份时不发请求——保持「搜不到候选就不读详情」的既有约定，
+ * 否则每轮会为所有条目白付一次详情请求。书籍必须读详情：ISBN 只存在于
+ * `api_url` 返回的 Edition 里，列表内联的 item 没有该字段。
+ *
+ * 读取失败返回 failed 且不缓存 —— 不能把一次网络故障固化成「没有年份/没有 ISBN」。
  */
-async function resolveItemYear(
+async function resolveItemDetail(
   item: NeodbItem,
   ctx: SyncContext,
-): Promise<YearResolution> {
-  const direct = neodbItemYear(item);
-  if (direct != null) {
-    return { kind: 'ok', year: direct };
+): Promise<ItemDetailResolution> {
+  const directYear = neodbItemYear(item);
+  if (directYear != null && item.category !== 'book') {
+    return { kind: 'ok', year: directYear, isbn: null };
   }
-  const cached = ctx.yearCache.get(item.uuid);
-  if (cached !== undefined) {
-    return { kind: 'ok', year: cached };
+  const cached = ctx.itemCache.get(item.uuid);
+  if (cached) {
+    return { kind: 'ok', ...cached };
   }
   const detail = await getNeodbItemDetail(item.api_url);
   if (detail === null) {
     return { kind: 'failed' };
   }
-  const year = neodbItemYear(detail);
-  ctx.yearCache.set(item.uuid, year);
-  return { kind: 'ok', year };
+  const value = {
+    year: neodbItemYear(detail) ?? directYear,
+    isbn: normalizeIsbn(detail.isbn),
+  };
+  ctx.itemCache.set(item.uuid, value);
+  return { kind: 'ok', ...value };
 }
 
 // ─────────────────────────────────────────────────────────────────────────

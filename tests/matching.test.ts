@@ -478,6 +478,94 @@ describe('影视年份证据（strict + movie/tv）', () => {
   });
 });
 
+describe('ISBN 裁决（仅书籍）', () => {
+  const isbn = '9784047376465';
+
+  it('唯一命中 → via=isbn，且不再看年份（年份差很大也认）', async () => {
+    const picked = await pickExactMatch(
+      [
+        subject({
+          id: 60,
+          type: 1,
+          air_year: 2000,
+          infobox: [{ key: 'ISBN', value: '978-4-04-737646-5' }],
+        }),
+      ],
+      2020,
+      0,
+      { expectedIsbn: isbn },
+    );
+    expect(picked).toEqual({
+      status: 'matched',
+      subject: expect.objectContaining({ id: 60 }),
+      via: 'isbn',
+    });
+  });
+
+  it('版本子项里的 ISBN 也算命中', async () => {
+    const picked = await pickExactMatch(
+      [
+        subject({
+          id: 61,
+          type: 1,
+          infobox: [
+            { key: 'ISBN', value: '9787513356756' },
+            { key: '版本:日版', value: [{ k: 'ISBN', v: isbn }] },
+          ],
+        }),
+      ],
+      null,
+      1,
+      { expectedIsbn: isbn },
+    );
+    expect(picked.status === 'matched' && picked.via).toBe('isbn');
+  });
+
+  it('同一 ISBN 命中多个 subject → ambiguous + duplicate-isbn，不猜', async () => {
+    const picked = await pickExactMatch(
+      [
+        subject({ id: 62, type: 1, infobox: [{ key: 'ISBN', value: isbn }] }),
+        subject({ id: 63, type: 1, infobox: [{ key: 'ISBN', value: isbn }] }),
+      ],
+      2020,
+      1,
+      { expectedIsbn: isbn },
+    );
+    expect(picked).toEqual({
+      status: 'ambiguous',
+      candidates: [
+        expect.objectContaining({ id: 62 }),
+        expect.objectContaining({ id: 63 }),
+      ],
+      hold: 'duplicate-isbn',
+    });
+  });
+
+  it('候选没有 ISBN → 保持中性，回落到年份裁决', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 64, type: 1, air_year: 2020 })],
+      2020,
+      0,
+      {
+        expectedIsbn: isbn,
+      },
+    );
+    expect(picked.status).toBe('matched');
+    expect('via' in picked && picked.via).toBeFalsy();
+    expect(picked.status === 'matched' && picked.subject.id).toBe(64);
+  });
+
+  it('源侧没有 ISBN → 完全不触发 ISBN 裁决', async () => {
+    const picked = await pickExactMatch(
+      [subject({ id: 65, type: 1, air_year: 2010 })],
+      2020,
+      0,
+      { expectedIsbn: null },
+    );
+    expect(picked.status).toBe('no-candidate');
+  });
+});
+
 function holdInsufficient(picked: { status: string; hold?: string }): boolean {
   return picked.status === 'ambiguous' && picked.hold === 'insufficient-evidence';
 }

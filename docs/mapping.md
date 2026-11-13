@@ -53,6 +53,13 @@
    podcast/performance 无对应，直接跳过），
    候选 name/name_cn 经 trim().toLowerCase() 后必须与搜索标题完全相等
 3. 证据裁决：
+   a0. ISBN 裁决（仅书籍，命中即定案，先于年份）：
+      源 ISBN 取自 NeoDB 条目详情（书架列表不含），候选 ISBN 取自主 infobox
+      的 ISBN 与全部「版本:*」子项；两侧归一化（去连字符、10 位转 13 位、
+      校验位）后精确相等才算命中。
+      · 命中 1 个 → matched（via=isbn），不再比较年份（再版必然有差）
+      · 命中 ≥2 个 → ambiguous（hold=duplicate-isbn），不写入、不猜顺序
+      · 未命中 / 任一侧没有 ISBN → 中性，继续下面的年份裁决
    a. 年份过滤（动画 2 / 真人 6 / 书籍 1 / 音乐 3 / 游戏 4）：
       双方都有 → |候选 − 源| ≤ 容差（书籍用 SYNC_YEAR_TOLERANCE_BOOK，
       其余用 SYNC_YEAR_TOLERANCE）；超容差 → 剔除（负证据：知道不是它）
@@ -77,7 +84,7 @@
 ```
 
 - 不猜、不模糊匹配、不跨分类回退；多候选不再取第一个。
-- 歧义不写入，记 unresolved，原因分两种：`ambiguous-bangumi-match`（多候选并列 / 证据不足）与 `ambiguous-year-missing`（影视年份不可判定）；本方向没有「直连回退」可用。
+- 歧义不写入，记 unresolved，原因分两种：`ambiguous-bangumi-match`（多候选并列 / 证据不足，含同一 ISBN 命中多个 subject 的 `duplicate-isbn`）与 `ambiguous-year-missing`（影视年份不可判定）；本方向没有「直连回退」可用。
 - 搜索失败、年份读取失败归 `failed`（可重跑），**不**伪装成「没有结果」；读取收藏失败同样按 failed 处理，绝不当成「未收藏」覆盖。
 - 条目缺年份时按 `api_url` 拉取 NeoDB 条目详情补齐并缓存；失败不缓存，下轮重试。
 - 未匹配与歧义写入待核对名单（upsert 去重，带 category/shelf/uuid）；在 NeoDB 条目上补 Bangumi 外链后下轮即可命中。

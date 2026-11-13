@@ -41,6 +41,8 @@ export type NeodbItem = {
   year?: number;
   /** EditionSchema（书籍）才有。 */
   pub_year?: number;
+  /** 书籍详情（`api_url`）才有；书架列表不返回。 */
+  isbn?: string;
 };
 
 /** PagedMarkSchema 里 `data[]` 的一项：书架标记（内联条目）。 */
@@ -75,6 +77,12 @@ export type BangumiSubjectType = 1 | 2 | 3 | 4 | 6;
 /** Bangumi 收藏类型：1 想看，2 看过，3 在看，4 搁置，5 抛弃。 */
 export type BangumiCollectionType = 1 | 2 | 3 | 4 | 5;
 
+/** Bangumi 信息表项；`版本:*` 这类条目的 value 是子键值对数组。 */
+export type BangumiInfoboxItem = {
+  key: string;
+  value: string | { k: string; v: string }[];
+};
+
 export type BangumiSubject = {
   id: number;
   type: BangumiSubjectType;
@@ -89,6 +97,8 @@ export type BangumiSubject = {
   eps?: number;
   /** 书籍总卷数。 */
   volumes?: number;
+  /** 完整条目才有：书籍的 ISBN / 作者 / 版本都在这里。 */
+  infobox?: BangumiInfoboxItem[];
 };
 
 export type BangumiEpisode = {

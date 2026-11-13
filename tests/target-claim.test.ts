@@ -26,7 +26,8 @@ describe('状态强度', () => {
   });
 
   it('排序键由置信度与状态组成', () => {
-    expect(claimRank(claim({ via: 'link', shelfType: 'wishlist' }))).toEqual([2, 2]);
+    expect(claimRank(claim({ via: 'link', shelfType: 'wishlist' }))).toEqual([3, 2]);
+    expect(claimRank(claim({ via: 'isbn', shelfType: 'wishlist' }))).toEqual([2, 2]);
     expect(claimRank(claim({ via: 'title', shelfType: 'complete' }))).toEqual([1, 3]);
   });
 });

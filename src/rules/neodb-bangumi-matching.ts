@@ -4,8 +4,9 @@
  * 1. 外链直连：`external_resources` 里的 Bangumi subject id（最可靠）；
  * 2. 标题搜索 + 精确匹配：`display_title` → `title` → `localized_title[].text`
  *    依次作为关键词，候选 `name` / `name_cn` 规范化后必须完全相等；
- * 3. 证据裁决：先按年份过滤，再按媒体形态拒绝明显冲突，最后按年份接近度
- *    打分；唯一最高分才命中，并列 → ambiguous（不猜）。
+ * 3. 证据裁决：书籍先比 ISBN（身份键，命中即定案），其余按年份过滤、媒体
+ *    形态拒绝明显冲突、年份接近度打分；唯一最高分才命中，并列 → ambiguous。
+ *    同一 ISBN 命中多个 subject 时不猜（通常是重复条目），转 ambiguous。
  *
  * 年份三态规则保持不变：源年份未知 → 不做年份过滤；候选年份未知 → 通过
  * （缺数据不是反对证据）；双方都有 → 差值在容差内才保留。覆盖动画（2）/
@@ -23,6 +24,7 @@
  * 宁可漏配，不可错配。书籍/音乐/游戏候选的证据读取方未覆盖，不参与此规则。
  */
 import type { BangumiSubject, NeodbItem } from '../types';
+import { extractIsbns } from './isbn';
 
 /** 粗粒度媒体形态；只表达电影与剧集两类可判定的形态。 */
 export type MediaForm = 'movie' | 'tv';
@@ -192,16 +194,22 @@ export type MatchEvidence = {
 };
 
 export type MatchPick =
-  | { status: 'matched'; subject: BangumiSubject }
+  | {
+      status: 'matched';
+      subject: BangumiSubject;
+      /** 命中路径；缺省表示走标题+年份，`isbn` 表示 ISBN 硬键命中。 */
+      via?: 'isbn';
+    }
   | {
       status: 'ambiguous';
       candidates: BangumiSubject[];
       /**
        * 歧义成因：
        * - `insufficient-evidence`：唯一候选证据不足（strict 持留）；
-       * - `year-missing`：影视条目任一侧年份不可判定，缺失即不裁决。
+       * - `year-missing`：影视条目任一侧年份不可判定，缺失即不裁决；
+       * - `duplicate-isbn`：同一 ISBN 命中多个 subject（通常是重复条目）。
        */
-      hold?: 'insufficient-evidence' | 'year-missing';
+      hold?: 'insufficient-evidence' | 'year-missing' | 'duplicate-isbn';
     }
   | { status: 'no-candidate' };
 
@@ -225,6 +233,13 @@ export type MatchPickOptions = {
    * 未提供时跟随 `tolerance`。其余类目不使用该值。
    */
   bookTolerance?: number;
+  /**
+   * 源侧 ISBN（已归一化）。仅书籍匹配传入；null/undefined 表示不可用，
+   * 此时完全跳过 ISBN 裁决，行为与未引入该信号前一致。
+   */
+  expectedIsbn?: string | null;
+  /** 读取候选的全部 ISBN；缺省用 infobox 解析（含「版本:*」子项）。 */
+  resolveIsbn?: (subject: BangumiSubject) => Promise<string[]> | string[];
 };
 
 /**
@@ -254,6 +269,27 @@ export async function pickExactMatch(
 ): Promise<MatchPick> {
   if (!candidates.length) {
     return { status: 'no-candidate' };
+  }
+
+  // ISBN 裁决先于年份：它标识的是「同一版次」，命中即无需再比年份。
+  if (options.expectedIsbn) {
+    const readIsbn = options.resolveIsbn ?? extractIsbns;
+    const hits: BangumiSubject[] = [];
+    for (const candidate of candidates) {
+      if (candidate.type !== 1) continue;
+      const isbns = await readIsbn(candidate);
+      if (isbns.includes(options.expectedIsbn)) {
+        hits.push(candidate);
+      }
+    }
+    if (hits.length === 1) {
+      return { status: 'matched', subject: hits[0]!, via: 'isbn' };
+    }
+    if (hits.length > 1) {
+      // 同一 ISBN 对应多个 subject：通常意味着 Bangumi 有重复条目。
+      // 不猜、不取第一个——写入任何一个都可能把收藏挂到错的那条上。
+      return { status: 'ambiguous', candidates: hits, hold: 'duplicate-isbn' };
+    }
   }
 
   const resolveEvidence =

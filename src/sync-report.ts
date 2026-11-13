@@ -185,8 +185,8 @@ export type MatchAuditEntry = {
   label: string;
   category: string;
   shelf: string;
-  /** 匹配方式：link = NeoDB 外链直连；title = 标题搜索；null = 未进入匹配。 */
-  via: 'link' | 'title' | null;
+  /** 匹配方式：link = 外链直连；isbn = ISBN 命中；title = 标题搜索；null = 未进入匹配。 */
+  via: 'link' | 'isbn' | 'title' | null;
   subjectId: number | null;
   /** 命中条目名；仅标题匹配可即时获得（link 直连不额外发请求补名字）。 */
   subjectName: string | null;

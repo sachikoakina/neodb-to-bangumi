@@ -5,14 +5,14 @@
  * 它们的标记可能映射到同一个 Bangumi subject。若两条都写，后写者会覆盖
  * 先写者，「看过」可能被「在看/想看」冲掉。这里用一份轮内认领表决定胜者：
  *
- * 1. 身份置信度：外链（link）> 标题匹配（title）；
+ * 1. 身份置信度：外链（link）> ISBN（isbn）> 标题匹配（title）；
  * 2. 状态强度：complete > progress / wishlist > dropped；
  * 3. 仍相同：较小 NeoDB uuid 胜出（保证同一轮内结果确定）。
  *
  * 认领表只在当前运行内有效，不跨轮持久化 —— 跨轮状态会让胜负随运行顺序
  * 翻转，造成反复写入。
  */
-export type ClaimVia = 'link' | 'title';
+export type ClaimVia = 'link' | 'isbn' | 'title';
 
 export type TargetClaim = {
   subjectId: number;
@@ -21,9 +21,10 @@ export type TargetClaim = {
   via: ClaimVia;
 };
 
-/** 身份置信度：外链是用户自己的选择，高于标题搜索。 */
+/** 身份置信度：外链是用户自己的选择，高于 ISBN（版次身份），再高于标题搜索。 */
 export const VIA_RANK: Record<ClaimVia, number> = {
-  link: 2,
+  link: 3,
+  isbn: 2,
   title: 1,
 };
 
