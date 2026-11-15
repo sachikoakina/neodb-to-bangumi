@@ -86,7 +86,7 @@ describe('分组', () => {
 });
 
 describe('折叠（Job Summary 的 details）', () => {
-  it('书籍与音乐默认折叠，电影保持展开', () => {
+  it('除未分类外全部折叠：书籍/电影/电视剧/音乐都走 details', () => {
     const book = render([entry({ category: 'book' })]);
     expect(book).toContain('<details>');
     expect(book).toContain('<summary><b>书籍（1）</b></summary>');
@@ -94,12 +94,21 @@ describe('折叠（Job Summary 的 details）', () => {
     // 折叠时不再重复输出粗体标题，避免 summary 与正文各显示一次
     expect(book).not.toContain('**书籍（1）**');
 
+    const movie = render([entry({ category: 'movie' })]);
+    expect(movie).toContain('<summary><b>电影（1）</b></summary>');
+    expect(movie).not.toContain('**电影（1）**');
+
+    const tv = render([entry({ category: 'tv' })]);
+    expect(tv).toContain('<summary><b>电视剧（1）</b></summary>');
+
     const music = render([entry({ category: 'music' })]);
     expect(music).toContain('<summary><b>音乐（1）</b></summary>');
+  });
 
-    const movie = render([entry({ category: 'movie' })]);
-    expect(movie).toContain('**电影（1）**');
-    expect(movie).not.toContain('<details>');
+  it('未分类保持展开（异常信号不该被收起）', () => {
+    const md = render([entry({ category: undefined })]);
+    expect(md).toContain('**未分类（1）**');
+    expect(md).not.toContain('<details>');
   });
 
   it('多个折叠分类各自闭合，标签成对', () => {

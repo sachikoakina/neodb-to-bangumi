@@ -93,11 +93,16 @@ const CATEGORY_ORDER: readonly string[] = [
 const SHELF_ORDER: readonly string[] = ['wishlist', 'progress', 'complete', 'dropped'];
 
 /**
- * 默认折叠的分类：条目多、单条价值低，是否展开交给读者。
+ * 默认折叠的分类：除「未分类」外全部折叠，是否展开交给读者。
+ *
+ * 「未分类」保持展开：它意味着条目缺少 category，属数据异常信号，
+ * 藏起来会让这类问题更难被发现。
  * 只影响 Job Summary 的排版（`<details>`），不改变任何数据。
  */
 const COLLAPSED_CATEGORIES: ReadonlySet<string> = new Set([
   'book',
+  'movie',
+  'tv',
   'music',
   'game',
   'podcast',
