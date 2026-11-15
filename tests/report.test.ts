@@ -152,6 +152,36 @@ describe('摘要渲染', () => {
     expect(md).toContain('本轮无待核对条目。');
   });
 
+  it('表格下方列出写入条目：名称 + NeoDB 链接 + Bangumi 链接', () => {
+    const report = createReport();
+    record(report, 'written');
+    const md = renderSummaryMarkdown(report, {
+      ...baseCtx,
+      writtenItems: [
+        {
+          title: '狐妖小红娘·王权篇',
+          neodbUrl: 'https://neodb.social/tv/season/0sMADT4DQansMdT6YkDPrG',
+          subjectId: 281271,
+        },
+      ],
+    });
+    expect(md).toContain('### 写入条目（1）');
+    expect(md).toContain('<summary><b>NeoDB → Bangumi（1）</b></summary>');
+    expect(md).toContain(
+      '- 狐妖小红娘·王权篇 — https://neodb.social/tv/season/0sMADT4DQansMdT6YkDPrG ' +
+        '—— https://bgm.tv/subject/281271',
+    );
+    expect(md).toContain('</details>');
+    // 位置：计数表之后、待核对名单之前
+    expect(md.indexOf('### 写入条目')).toBeGreaterThan(md.indexOf('| 扫描 |'));
+    expect(md.indexOf('### 写入条目')).toBeLessThan(md.indexOf('## 待核对名单'));
+  });
+
+  it('没有写入条目时不渲染该区块', () => {
+    const md = renderSummaryMarkdown(createReport(), baseCtx);
+    expect(md).not.toContain('### 写入条目');
+  });
+
   it('接入待核对清单：分组标题、条目行与 subject 后缀', () => {
     const md = renderSummaryMarkdown(createReport(), {
       ...baseCtx,

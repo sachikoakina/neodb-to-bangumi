@@ -115,6 +115,7 @@ async function main(): Promise<void> {
     fullSync: config.sync.fullSync,
     shelves: config.sync.shelfTypes,
     truncatedShelves,
+    writtenItems: result.writtenItems,
     unmatchedEntries: result.unmatchedLive,
     unmatchedAdded: result.unmatchedAdded,
     unmatchedRemoved: result.unmatchedRemoved,

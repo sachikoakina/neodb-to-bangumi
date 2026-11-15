@@ -25,6 +25,18 @@ export type PathReport = {
   failed: number;
 };
 
+/** 本轮成功写入的条目：用于摘要表格下方的「写入条目」区块。 */
+export type WrittenItem = {
+  /** NeoDB 条目名（优先本地化名）。 */
+  title: string;
+  /** NeoDB 条目绝对地址。 */
+  neodbUrl: string;
+  /** 写入的 Bangumi 条目 id。 */
+  subjectId: number;
+  /** 写入所属链路；缺省为 NeoDB → Bangumi。 */
+  pathLabel?: string;
+};
+
 export function createReport(): PathReport {
   return { scanned: 0, written: 0, unchanged: 0, skipped: 0, unresolved: 0, failed: 0 };
 }
@@ -250,6 +262,8 @@ export type SummaryContext = {
   fullSync: boolean;
   shelves: readonly ShelfType[];
   truncatedShelves: readonly ShelfType[];
+  /** 本轮成功写入的条目；dry-run 不产出（它没有真正写入）。 */
+  writtenItems?: readonly WrittenItem[];
   /**
    * 名单正文（已越过观察窗）。渲染由 `unmatched-report.ts` 负责：
    * 按链路→状态→分类→书架四级分组逐条列出。
@@ -313,6 +327,32 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
     `| ${report.scanned} | ${report.written} | ${report.unchanged} | ${report.skipped} | ${report.unresolved} | ${report.failed} |`,
   );
   lines.push('');
+  const writtenItems = ctx.writtenItems ?? [];
+  if (writtenItems.length) {
+    lines.push(`### 写入条目（${writtenItems.length}）`);
+    lines.push('');
+    const byPath = new Map<string, WrittenItem[]>();
+    for (const item of writtenItems) {
+      const pathLabel = item.pathLabel || 'NeoDB → Bangumi';
+      const group = byPath.get(pathLabel) ?? [];
+      group.push(item);
+      byPath.set(pathLabel, group);
+    }
+    for (const [pathLabel, items] of byPath) {
+      lines.push('<details>');
+      lines.push('');
+      lines.push(`<summary><b>${pathLabel}（${items.length}）</b></summary>`);
+      lines.push('');
+      for (const item of items) {
+        lines.push(
+          `- ${item.title} — ${item.neodbUrl} —— https://bgm.tv/subject/${item.subjectId}`,
+        );
+      }
+      lines.push('');
+      lines.push('</details>');
+      lines.push('');
+    }
+  }
   // 待核对清单是这份报告的主内容，排在耗时统计之前：读者先看「哪些没导进去」。
   lines.push(
     ...renderUnmatchedSection(ctx.unmatchedEntries ?? [], {

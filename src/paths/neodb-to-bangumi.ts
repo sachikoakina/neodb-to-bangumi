@@ -96,6 +96,7 @@ import {
   type UnmatchedEntry,
   type UnmatchedKind,
   type UnmatchedMap,
+  type WrittenItem,
 } from '../sync-report';
 import { mergeRounds } from '../rules/review-rounds';
 import type {
@@ -139,6 +140,8 @@ type SyncContext = {
   matchAudit: MatchAuditEntry[];
   /** 本轮真正检查过、且仍未导入的条目（按 uuid 索引）。 */
   observed: UnmatchedMap;
+  /** 本轮成功写入的条目（dry-run 不记录），用于摘要的「写入条目」区块。 */
+  writtenItems: WrittenItem[];
   /** 本轮因导入成功而移出的 uuid。 */
   importedUuids: Set<string>;
   /** 本轮完整遍历完毕的书架：只有它们能判定「未再出现」。 */
@@ -178,6 +181,8 @@ class AuthAbortError extends Error {}
 export type SyncRunResult = {
   aborted: false | 'neodb-auth' | 'bangumi-auth';
   report: PathReport;
+  /** 本轮成功写入的条目；dry-run 为空数组。 */
+  writtenItems: WrittenItem[];
   /** 合并后的全量名单（含仍在观察期的条目）。 */
   unmatched: UnmatchedEntry[];
   /** 名单正文：已越过观察窗。 */
@@ -224,6 +229,7 @@ export default async function runNeodbToBangumi(
     return {
       aborted: 'neodb-auth',
       report,
+      writtenItems: [],
       unmatched,
       unmatchedLive: [],
       unmatchedAdded: [],
@@ -245,6 +251,7 @@ export default async function runNeodbToBangumi(
     return {
       aborted: 'bangumi-auth',
       report,
+      writtenItems: [],
       unmatched,
       unmatchedLive: [],
       unmatchedAdded: [],
@@ -267,6 +274,7 @@ export default async function runNeodbToBangumi(
     return {
       aborted: 'bangumi-auth',
       report,
+      writtenItems: [],
       unmatched,
       unmatchedLive: [],
       unmatchedAdded: [],
@@ -305,6 +313,7 @@ export default async function runNeodbToBangumi(
     subjectCache: new Map(),
     targetClaims: new Map(),
     unmatched,
+    writtenItems: [],
     aborted: false,
     stopReason: null,
     matchAudit: [],
@@ -516,6 +525,7 @@ export default async function runNeodbToBangumi(
     aborted: ctx.aborted ? 'bangumi-auth' : false,
     report,
     unmatched: merged.entries,
+    writtenItems: ctx.writtenItems,
     unmatchedLive: merged.live,
     unmatchedAdded: merged.added,
     unmatchedRemoved: merged.removed,
@@ -870,6 +880,15 @@ async function processMark(
       `分集未拉满，保留 pending 供下一轮继续: subject/${subjectId} ` +
         `remaining=${progress.kind === 'written' ? (progress.remaining ?? '?') : '?'}（${label}）`,
     );
+  }
+  // 摘要里的「写入条目」清单：只记真正提交过的，dry-run 的计划不算。
+  if (decision.outcome === 'written' && !config.sync.dryRun) {
+    ctx.writtenItems.push({
+      title: label,
+      neodbUrl: absoluteNeodbUrl(item.url, config.neodb.baseUrl),
+      subjectId,
+      pathLabel: 'NeoDB → Bangumi',
+    });
   }
   return finish(
     decision.outcome,
