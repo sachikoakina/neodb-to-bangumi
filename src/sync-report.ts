@@ -339,8 +339,8 @@ export function renderSummaryMarkdown(report: PathReport, ctx: SummaryContext): 
       byPath.set(pathLabel, group);
     }
     for (const [pathLabel, items] of byPath) {
+      // `<summary>` 必须是 `<details>` 的第一个子元素，中间不留空行。
       lines.push('<details>');
-      lines.push('');
       lines.push(`<summary><b>${pathLabel}（${items.length}）</b></summary>`);
       lines.push('');
       for (const item of items) {
