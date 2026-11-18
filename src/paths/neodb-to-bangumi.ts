@@ -568,12 +568,14 @@ async function processMark(
 
   // 分类白名单（三态，写错配置时已在解析期失败在关闭一侧）。
   if (!categoryAllowed(config.sync.categories, item.category)) {
+    // 提前结束：该分类不在 SYNC_CATEGORIES 白名单内，用户明确不要同步它。
     return finish('skipped', 'category-not-allowed');
   }
 
   // Bangumi 不支持该分类（podcast / performance）。
   if (!isBangumiSupportedCategory(item.category)) {
     consola.info(`Bangumi 无对应分类，跳过: ${item.category} ${label}`);
+    // 提前结束：分类本身在 Bangumi 没有对应条目类型，写不进去。
     return finish('skipped', 'unsupported-category');
   }
 
@@ -587,6 +589,7 @@ async function processMark(
       `匹配失败，记 failed（下轮可重试）: uuid=${item.uuid} ${match.reason} ${label}`,
     );
     observeUnmatched(ctx, mark, 'failed', match.reason, label);
+    // 提前结束：搜索或详情读取出错（5xx/超时），属技术失败，下一轮会重试。
     return finish('failed', match.reason);
   }
   if (match.kind === 'unresolved') {
@@ -594,6 +597,7 @@ async function processMark(
     consola.info(
       `未匹配 Bangumi 条目（${match.reason}），记入待核对: uuid=${item.uuid} ${label}`,
     );
+    // 提前结束：搜过了但没有可信候选（或候选被年份筛掉），是数据缺口不是错误。
     return finish('unresolved', match.reason);
   }
 
@@ -627,6 +631,8 @@ async function processMark(
         `kept=${incumbent.neodbUuid}(${incumbent.via},${incumbent.shelfType}) ` +
         `skipped=${item.uuid}(${claim.via},${claim.shelfType})`,
     );
+    // 提前结束：同一 Bangumi 目标已被更强的认领者占用，本条让位；
+    // 不带退避，下一轮仍会重新裁决。
     return finish('skipped', 'duplicate-target');
   }
 
@@ -636,6 +642,7 @@ async function processMark(
   );
   if (existingRes.status === 'error') {
     observeUnmatched(ctx, mark, 'failed', 'target-read-failed', label, subjectId);
+    // 提前结束：读目标收藏失败。绝不当成「还没收藏」继续写，否则会覆盖已有数据。
     return finish('failed', 'target-read-failed', existingRes.message);
   }
   const existing = existingRes.status === 'found' ? existingRes.value : null;
@@ -648,10 +655,12 @@ async function processMark(
   );
   if (status.kind === 'unknown-shelf-type') {
     consola.warn(`无法识别的 NeoDB 书架状态「${mark.shelf_type}」，跳过: ${label}`);
+    // 提前结束：shelf_type 不在已知取值内，猜不出该写成什么状态。
     return finish('skipped', 'unknown-shelf-type');
   }
   if (status.kind === 'skip-on-hold') {
     consola.info(`Bangumi 现有「搁置」，NeoDB 无法表达该状态，保留: ${label}`);
+    // 提前结束：目标已是「搁置」，NeoDB 没有对应状态可回写，写了就是信息丢失。
     return finish('skipped', 'hold-protected');
   }
   if (status.kind === 'no-downgrade') {
@@ -712,6 +721,7 @@ async function processMark(
     );
     if (subjectRes.status !== 'found') {
       observeUnmatched(ctx, mark, 'failed', 'subject-read-failed', label, subjectId);
+      // 提前结束：书籍进度需要 eps/volumes 总量，读不到就无法算目标值。
       return finish(
         'failed',
         'subject-read-failed',
@@ -750,6 +760,7 @@ async function processMark(
           `[dry-run] 收藏字段无变化；分集完整性不在 dry-run 校验（正式运行才读取）: ${label}`,
         );
       }
+      // 提前结束（dry-run）：收藏字段无变化且没有待写的书籍进度，无需计划写入。
       return finish('unchanged');
     }
     const extras = [
@@ -763,6 +774,7 @@ async function processMark(
         `comment=${JSON.stringify(existing?.comment ?? '')}→${JSON.stringify(comment)} ` +
         `private=${existing?.private ?? 'none'}→${privatePlan.private}${extras}（${label}）`,
     );
+    // 提前结束（dry-run）：只输出计划，不做任何实际写入。
     return finish('written', `plan:${reasons.join('+')}`);
   }
 
@@ -800,6 +812,8 @@ async function processMark(
           `目标不可收藏，转待核对: subject/${subjectId} uuid=${item.uuid} ` +
             `${write.message}（${label}）`,
         );
+        // 提前结束：404 表示服务端拒绝为该目标建收藏（条目被合并/锁定），
+        // 重试无法自愈，因此转待核对留人处理，且不判 failed 以免定时任务永久变红。
         return finish(
           'unresolved',
           'collection-not-found',
@@ -814,6 +828,7 @@ async function processMark(
         label,
         subjectId,
       );
+      // 提前结束：写收藏遇到非 404 的失败（5xx/超时），下一轮可重试。
       return finish('failed', 'collection-write-failed', truncateError(write.message));
     }
     consola.info(
@@ -866,6 +881,8 @@ async function processMark(
       label,
       subjectId,
     );
+    // 提前结束：分集写入未完成。必须清掉增量指纹，否则下一轮会把它当成「已同步」
+    // 直接跳过，没点满的分集就永远补不上了。
     return finish('failed', decision.reason, message);
   }
 
@@ -890,6 +907,8 @@ async function processMark(
       pathLabel: 'NeoDB → Bangumi',
     });
   }
+  // 正常结束（非提前返回）：按决策结果返回 written / unchanged，
+  // 分集被上限截断时把原因标成 progress-partial，反之记录具体变更因素。
   return finish(
     decision.outcome,
     decision.outcome === 'written'
